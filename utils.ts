@@ -76,54 +76,54 @@ async function signPayload(
   };
 }
 
+export function extractCookiesFromResponse(response: Response): string[] {
+  const setCookieHeaders = response.headers.getSetCookie?.() || [];
+  return setCookieHeaders
+    .map((cookie) => {
+      // Extract just the name=value part (before the first semicolon)
+      const cookieValue = cookie.split(";")[0];
+      return cookieValue || null;
+    })
+    .filter((cookie): cookie is string => cookie !== null);
+}
+
 // Make a signed request to TR API
-export async function makeSignedRequest<T>(
+export async function makeSignedRequest(
   path: string,
   payload: object,
-  privateKey?: CryptoKey,
-): Promise<T> {
+  method: "GET" | "POST" = "POST",
+  cookies?: string[],
+): Promise<Response> {
   const url = `${TR_API_URL}${path}`;
 
-  if (privateKey) {
-    const { timestamp, signature } = await signPayload(privateKey, payload);
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
 
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Zeta-Timestamp": timestamp,
-        "X-Zeta-Signature": signature,
-      },
-      body: JSON.stringify(payload),
-    });
-
-    if (!response.ok) {
-      throw new Error(
-        `Request failed: ${response.status} ${
-          response.statusText
-        } - ${await response.text()}`,
-      );
-    }
-
-    return (await response.json()) as T;
-  } else {
-    // Unsigned request (for initial device reset)
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    });
-
-    if (!response.ok) {
-      throw new Error(
-        `Request failed: ${response.status} ${
-          response.statusText
-        } - ${await response.text()}`,
-      );
-    }
-
-    return (await response.json()) as T;
+  // Add cookies if requested
+  if (cookies && cookies.length > 0) {
+    headers["Cookie"] = cookies.join("; ");
   }
+
+  const requestOptions: RequestInit = {
+    method,
+    headers,
+  };
+
+  // Only add body for POST requests
+  if (method === "POST") {
+    requestOptions.body = JSON.stringify(payload);
+  }
+
+  const response = await fetch(url, requestOptions);
+
+  if (!response.ok) {
+    throw new Error(
+      `Request failed: ${response.status} ${
+        response.statusText
+      } - ${await response.text()}`,
+    );
+  }
+
+  return response;
 }
