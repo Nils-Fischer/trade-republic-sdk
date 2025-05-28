@@ -124,10 +124,12 @@ export async function makeSignedRequest(
   const response = await fetch(url, requestOptions);
 
   if (!response.ok) {
-    throw new Error(
-      `Request failed: ${response.status} ${
-        response.statusText
-      } - ${await response.text()}`,
+    return Promise.reject(
+      new Error(
+        `Request failed: ${response.status} ${
+          response.statusText
+        } - ${await response.text()}`,
+      ),
     );
   }
 

@@ -20,22 +20,22 @@ npm install trade-republic-sdk
 ## Quick Start
 
 ```typescript
-import { TradeRepublicClient } from 'trade-republic-sdk';
+import { TradeRepublicClient } from "trade-republic-sdk";
 
 const client = new TradeRepublicClient();
 
 try {
   // Step 1: Initiate login (sends OTP to your device)
-  await client.initiateLogin('+49151507xxxxx', '1234');
-  
+  await client.initiateLogin("+49151507xxxxx", "1234");
+
   // Step 2: Complete login with OTP received via SMS
-  await client.completeLogin('5678');
-  
+  await client.completeLogin("5678");
+
   // Step 3: Use authenticated client
   const accountInfo = await client.getAccountInfo();
   console.log(accountInfo);
 } catch (error) {
-  console.error('Authentication failed:', error);
+  console.error("Authentication failed:", error);
 }
 ```
 
@@ -49,24 +49,24 @@ The Trade Republic API uses a two-step authentication process:
 ### Step-by-Step Example
 
 ```typescript
-import { TradeRepublicClient } from 'trade-republic-sdk';
+import { TradeRepublicClient } from "trade-republic-sdk";
 
 const client = new TradeRepublicClient();
 
 // Step 1: Initiate login
-console.log('Sending login request...');
+console.log("Sending login request...");
 await client.initiateLogin(phoneNumber, pin);
-console.log('OTP sent to your device');
+console.log("OTP sent to your device");
 
 // Step 2: Wait for user to receive OTP and enter it
-const otpCode = '1234'; // Get this from user input
+const otpCode = "1234"; // Get this from user input
 await client.completeLogin(otpCode);
-console.log('Login successful!');
+console.log("Login successful!");
 
 // Step 3: Make authenticated requests
 if (client.isAuthenticated()) {
   const accountInfo = await client.getAccountInfo();
-  console.log('Account Info:', accountInfo);
+  console.log("Account Info:", accountInfo);
 }
 ```
 
@@ -104,26 +104,6 @@ Returns `true` if authenticated, `false` otherwise.
 ##### `logout(): void`
 
 Clears the current session, requiring re-authentication for future requests.
-
-## Error Handling
-
-The SDK throws errors for various scenarios:
-
-```typescript
-try {
-  await client.initiateLogin(phoneNumber, pin);
-  await client.completeLogin(otpCode);
-} catch (error) {
-  if (error.message.includes('Login not initiated')) {
-    // Handle case where completeLogin was called before initiateLogin
-  } else if (error.message.includes('Not authenticated')) {
-    // Handle case where API methods were called without authentication
-  } else {
-    // Handle other errors (network, invalid credentials, etc.)
-    console.error('Authentication error:', error);
-  }
-}
-```
 
 ## Development
 

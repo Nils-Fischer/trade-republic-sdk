@@ -41,11 +41,15 @@ export class TradeRepublicClient {
    */
   public async completeLogin(otpCode: string): Promise<void> {
     if (!this.processId) {
-      throw new Error("Login not initiated. Call initiateLogin() first.");
+      return Promise.reject(
+        new Error("Login not initiated. Call initiateLogin() first."),
+      );
     }
 
     if (this.initialCookies.length === 0) {
-      throw new Error("No initial cookies found. Call initiateLogin() first.");
+      return Promise.reject(
+        new Error("No initial cookies found. Call initiateLogin() first."),
+      );
     }
 
     const response = await makeSignedRequest(
@@ -65,8 +69,8 @@ export class TradeRepublicClient {
    */
   public async getAccountInfo(): Promise<unknown> {
     if (this.sessionCookies.length === 0) {
-      throw new Error(
-        "Not authenticated. Call initiateLogin() and completeLogin() first.",
+      return Promise.reject(
+        new Error("Not authenticated. Call initiateLogin() and completeLogin() first."),
       );
     }
 
@@ -85,8 +89,8 @@ export class TradeRepublicClient {
    */
   public async getTrendingStocks(): Promise<unknown> {
     if (this.sessionCookies.length === 0) {
-      throw new Error(
-        "Not authenticated. Call initiateLogin() and completeLogin() first.",
+      return Promise.reject(
+        new Error("Not authenticated. Call initiateLogin() and completeLogin() first."),
       );
     }
 
@@ -105,8 +109,8 @@ export class TradeRepublicClient {
    */
   public async getTaxExemptionOrders(): Promise<unknown> {
     if (this.sessionCookies.length === 0) {
-      throw new Error(
-        "Not authenticated. Call initiateLogin() and completeLogin() first.",
+      return Promise.reject(
+        new Error("Not authenticated. Call initiateLogin() and completeLogin() first."),
       );
     }
 
@@ -125,8 +129,8 @@ export class TradeRepublicClient {
    */
   public async getPersonalDetails(): Promise<unknown> {
     if (this.sessionCookies.length === 0) {
-      throw new Error(
-        "Not authenticated. Call initiateLogin() and completeLogin() first.",
+      return Promise.reject(
+        new Error("Not authenticated. Call initiateLogin() and completeLogin() first."),
       );
     }
 
@@ -145,8 +149,8 @@ export class TradeRepublicClient {
    */
   public async getPaymentMethods(): Promise<unknown> {
     if (this.sessionCookies.length === 0) {
-      throw new Error(
-        "Not authenticated. Call initiateLogin() and completeLogin() first.",
+      return Promise.reject(
+        new Error("Not authenticated. Call initiateLogin() and completeLogin() first."),
       );
     }
 
@@ -165,8 +169,8 @@ export class TradeRepublicClient {
    */
   public async getTaxResidency(): Promise<unknown> {
     if (this.sessionCookies.length === 0) {
-      throw new Error(
-        "Not authenticated. Call initiateLogin() and completeLogin() first.",
+      return Promise.reject(
+        new Error("Not authenticated. Call initiateLogin() and completeLogin() first."),
       );
     }
 
@@ -185,8 +189,8 @@ export class TradeRepublicClient {
    */
   public async getTaxInformation(): Promise<unknown> {
     if (this.sessionCookies.length === 0) {
-      throw new Error(
-        "Not authenticated. Call initiateLogin() and completeLogin() first.",
+      return Promise.reject(
+        new Error("Not authenticated. Call initiateLogin() and completeLogin() first."),
       );
     }
 
@@ -205,8 +209,8 @@ export class TradeRepublicClient {
    */
   public async getAllDocuments(): Promise<unknown> {
     if (this.sessionCookies.length === 0) {
-      throw new Error(
-        "Not authenticated. Call initiateLogin() and completeLogin() first.",
+      return Promise.reject(
+        new Error("Not authenticated. Call initiateLogin() and completeLogin() first."),
       );
     }
 
