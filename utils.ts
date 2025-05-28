@@ -93,12 +93,18 @@ export async function makeSignedRequest(
   payload: object,
   method: "GET" | "POST" = "POST",
   cookies?: string[],
+  language?: string,
 ): Promise<Response> {
   const url = `${TR_API_URL}${path}`;
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
+
+  // Add Accept-Language header if language is provided
+  if (language) {
+    headers["Accept-Language"] = language;
+  }
 
   // Add cookies if requested
   if (cookies && cookies.length > 0) {

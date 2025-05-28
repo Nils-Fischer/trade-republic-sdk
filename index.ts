@@ -5,6 +5,11 @@ export class TradeRepublicClient {
   private processId: string | null = null;
   private initialCookies: string[] = [];
   private sessionCookies: string[] = [];
+  private language: string;
+
+  constructor(language: string = "en") {
+    this.language = language;
+  }
 
   /**
    * Initiates the login process by sending phone number and PIN.
@@ -19,6 +24,8 @@ export class TradeRepublicClient {
         pin,
       },
       "POST",
+      undefined,
+      this.language,
     );
 
     const data = LoginResponseDataSchema.parse(await response.json());
@@ -46,6 +53,7 @@ export class TradeRepublicClient {
       {},
       "POST",
       this.initialCookies,
+      this.language,
     );
 
     this.sessionCookies = extractCookiesFromResponse(response);
@@ -67,6 +75,147 @@ export class TradeRepublicClient {
       {},
       "GET",
       this.sessionCookies,
+      this.language,
+    );
+    return result.json();
+  }
+
+  /**
+   * Retrieves trending stocks. Requires successful authentication.
+   */
+  public async getTrendingStocks(): Promise<unknown> {
+    if (this.sessionCookies.length === 0) {
+      throw new Error(
+        "Not authenticated. Call initiateLogin() and completeLogin() first.",
+      );
+    }
+
+    const result = await makeSignedRequest(
+      "/api/v1/ranking/trendingStocks",
+      {},
+      "GET",
+      this.sessionCookies,
+      this.language,
+    );
+    return result.json();
+  }
+
+  /**
+   * Retrieves tax exemption orders. Requires successful authentication.
+   */
+  public async getTaxExemptionOrders(): Promise<unknown> {
+    if (this.sessionCookies.length === 0) {
+      throw new Error(
+        "Not authenticated. Call initiateLogin() and completeLogin() first.",
+      );
+    }
+
+    const result = await makeSignedRequest(
+      "/api/v1/taxes/exemptionorders",
+      {},
+      "GET",
+      this.sessionCookies,
+      this.language,
+    );
+    return result.json();
+  }
+
+  /**
+   * Retrieves customer personal details. Requires successful authentication.
+   */
+  public async getPersonalDetails(): Promise<unknown> {
+    if (this.sessionCookies.length === 0) {
+      throw new Error(
+        "Not authenticated. Call initiateLogin() and completeLogin() first.",
+      );
+    }
+
+    const result = await makeSignedRequest(
+      "/api/v1/customer/personal-details",
+      {},
+      "GET",
+      this.sessionCookies,
+      this.language,
+    );
+    return result.json();
+  }
+
+  /**
+   * Retrieves payment methods. Requires successful authentication.
+   */
+  public async getPaymentMethods(): Promise<unknown> {
+    if (this.sessionCookies.length === 0) {
+      throw new Error(
+        "Not authenticated. Call initiateLogin() and completeLogin() first.",
+      );
+    }
+
+    const result = await makeSignedRequest(
+      "/api/v2/payment/methods",
+      {},
+      "GET",
+      this.sessionCookies,
+      this.language,
+    );
+    return result.json();
+  }
+
+  /**
+   * Retrieves tax residency information. Requires successful authentication.
+   */
+  public async getTaxResidency(): Promise<unknown> {
+    if (this.sessionCookies.length === 0) {
+      throw new Error(
+        "Not authenticated. Call initiateLogin() and completeLogin() first.",
+      );
+    }
+
+    const result = await makeSignedRequest(
+      "/api/v1/country/taxresidency",
+      {},
+      "GET",
+      this.sessionCookies,
+      this.language,
+    );
+    return result.json();
+  }
+
+  /**
+   * Retrieves tax information. Requires successful authentication.
+   */
+  public async getTaxInformation(): Promise<unknown> {
+    if (this.sessionCookies.length === 0) {
+      throw new Error(
+        "Not authenticated. Call initiateLogin() and completeLogin() first.",
+      );
+    }
+
+    const result = await makeSignedRequest(
+      "/api/v1/taxes/information",
+      {},
+      "GET",
+      this.sessionCookies,
+      this.language,
+    );
+    return result.json();
+  }
+
+  /**
+   * Retrieves all documents. Requires successful authentication.
+   */
+  public async getAllDocuments(): Promise<unknown> {
+    if (this.sessionCookies.length === 0) {
+      throw new Error(
+        "Not authenticated. Call initiateLogin() and completeLogin() first.",
+      );
+    }
+
+    const result = await makeSignedRequest(
+      "/api/v1/documents/all",
+      {},
+      "GET",
+      this.sessionCookies,
+      this.language,
     );
     return result.json();
   }
