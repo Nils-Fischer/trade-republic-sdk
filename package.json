@@ -1,0 +1,51 @@
+{
+  "name": "trade-republic-sdk",
+  "version": "0.1.0",
+  "description": "Unofficial SDK for Trade Republic API",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist/**/*",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "bun run example.ts",
+    "format": "prettier --write .",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "trade-republic",
+    "trading",
+    "api",
+    "sdk",
+    "finance"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/tr-sdk.git"
+  },
+  "devDependencies": {
+    "@inquirer/prompts": "^7.5.2",
+    "@types/bun": "latest",
+    "prettier": "^3.5.3",
+    "prettier-plugin-organize-imports": "^4.1.0",
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "zod": "^3.25.28"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
