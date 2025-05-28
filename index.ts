@@ -1,67 +1,89 @@
-import { input, password } from "@inquirer/prompts";
-import { type LoginResponse, LoginResponseDataSchema } from "./types";
+import { LoginResponseDataSchema } from "./types";
 import { extractCookiesFromResponse, makeSignedRequest } from "./utils";
 
-async function loginRequest(phoneNumber: string, pin: string): Promise<LoginResponse> {
-  const response: Response = await makeSignedRequest(
-    "/api/v1/auth/web/login",
-    {
-      phoneNumber,
-      pin,
-    },
-    "POST",
-  );
-  const data = LoginResponseDataSchema.parse(await response.json());
-  const responseCookies = extractCookiesFromResponse(response);
+export class TradeRepublicClient {
+  private processId: string | null = null;
+  private initialCookies: string[] = [];
+  private sessionCookies: string[] = [];
 
-  return { data, cookies: responseCookies };
-}
+  /**
+   * Initiates the login process by sending phone number and PIN.
+   * After this call succeeds, an OTP will be sent to the user's device.
+   * Call completeLogin() with the OTP to finish authentication.
+   */
+  public async initiateLogin(phoneNumber: string, pin: string): Promise<void> {
+    const response: Response = await makeSignedRequest(
+      "/api/v1/auth/web/login",
+      {
+        phoneNumber,
+        pin,
+      },
+      "POST",
+    );
 
-async function verifyLoginRequest(
-  processId: string,
-  authCode: string,
-  cookies: string[],
-): Promise<string[]> {
-  const result = await makeSignedRequest(
-    `/api/v1/auth/web/login/${processId}/${authCode}`,
-    {},
-    "POST",
-    cookies,
-  );
-  return extractCookiesFromResponse(result);
-}
+    const data = LoginResponseDataSchema.parse(await response.json());
+    this.processId = data.processId;
+    this.initialCookies = extractCookiesFromResponse(response);
 
-async function getAccountInfo(cookies: string[]): Promise<unknown> {
-  const result = await makeSignedRequest("/api/v2/auth/account", {}, "GET", cookies);
-  return result.json();
-}
+    console.log("Login initiated. OTP has been sent to your device.");
+  }
 
-if (import.meta.main) {
-  const phoneNumber = await input({
-    message: "Enter your phone number:",
-    default: "[REDACTED] ",
-  });
+  /**
+   * Completes the login process using the OTP received on the user's device.
+   * Must be called after initiateLogin().
+   */
+  public async completeLogin(otpCode: string): Promise<void> {
+    if (!this.processId) {
+      throw new Error("Login not initiated. Call initiateLogin() first.");
+    }
 
-  const pin = await password({
-    message: "Enter your 4-digit PIN:",
-    mask: "*",
-  });
+    if (this.initialCookies.length === 0) {
+      throw new Error("No initial cookies found. Call initiateLogin() first.");
+    }
 
-  const { data, cookies: loginCookies } = await loginRequest(phoneNumber, pin);
-  console.log("Login response:", data);
+    const response = await makeSignedRequest(
+      `/api/v1/auth/web/login/${this.processId}/${otpCode}`,
+      {},
+      "POST",
+      this.initialCookies,
+    );
 
-  const authCode = await password({
-    message: "Enter the 4-digit SMS verification code:",
-    mask: "*",
-  });
+    this.sessionCookies = extractCookiesFromResponse(response);
+    console.log("Login completed successfully.");
+  }
 
-  const verifiedCookies = await verifyLoginRequest(
-    data.processId,
-    authCode,
-    loginCookies,
-  );
-  console.log("Verification completed");
+  /**
+   * Retrieves account information. Requires successful authentication.
+   */
+  public async getAccountInfo(): Promise<unknown> {
+    if (this.sessionCookies.length === 0) {
+      throw new Error(
+        "Not authenticated. Call initiateLogin() and completeLogin() first.",
+      );
+    }
 
-  const accountInfo = await getAccountInfo(verifiedCookies);
-  console.log("Account info:", accountInfo);
+    const result = await makeSignedRequest(
+      "/api/v2/auth/account",
+      {},
+      "GET",
+      this.sessionCookies,
+    );
+    return result.json();
+  }
+
+  /**
+   * Checks if the client is currently authenticated.
+   */
+  public isAuthenticated(): boolean {
+    return this.sessionCookies.length > 0;
+  }
+
+  /**
+   * Clears the current session, requiring re-authentication.
+   */
+  public logout(): void {
+    this.processId = null;
+    this.initialCookies = [];
+    this.sessionCookies = [];
+  }
 }
