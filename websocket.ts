@@ -1,5 +1,39 @@
 import EventEmitter from "eventemitter3";
-import { CustomerPermissionsPayload } from "./subscriptionTypes";
+import {
+  AccountPairsResponse,
+  AggregateHistoryLightResponse,
+  AvailableCashResponse,
+  AvailableSizeResponse,
+  CashResponse,
+  CollectionResponse,
+  CompactPortfolioByTypeResponse,
+  CustomerPermissionsResponse,
+  DerivativesResponse,
+  FincrimeBannerResponse,
+  FrontendExperimentResponse,
+  HomeInstrumentExchangeResponse,
+  InstrumentResponse,
+  NamedWatchlistResponse,
+  NeonNewsResponse,
+  NeonSearchData,
+  NeonSearchResponse,
+  NeonSearchSuggestedTagsResponse,
+  OrdersResponse,
+  PerformanceResponse,
+  PortfolioStatusResponse,
+  PriceForOrderResponse,
+  SavingsPlansResponse,
+  StockDetailsResponse,
+  TickerResponse,
+  TimelineActionsV2Response,
+  TimelineActivityLogResponse,
+  TimelineDetailV2Response,
+  TimelineSavingsPlanOverviewResponse,
+  TimelineTransactionsResponse,
+  TradingPerkConditionStatusResponse,
+  WatchlistsResponse,
+  YieldToMaturityResponse,
+} from "./subscriptionTypes";
 import { createWebSocket, IWebSocketClient } from "./websocketFactory";
 
 export class TRWebSocket extends EventEmitter {
@@ -185,9 +219,257 @@ export class TRWebSocket extends EventEmitter {
     this.subscribe(requestId, payload);
   }
 
+  public subscribeToAccountPairs(callback?: (data: AccountPairsResponse) => void): void {
+    this.subscribeTo({ type: "accountPairs" }, callback);
+  }
+
+  public subscribeToAggregateHistoryLight(
+    range: "1d" | "1w" | "1m" | "3m" | "1y" | "max",
+    id: string,
+    callback?: (data: AggregateHistoryLightResponse) => void,
+  ): void {
+    this.subscribeTo({ type: "aggregateHistoryLight", range, id }, callback);
+  }
+
+  public subscribeToAvailableCash(
+    callback?: (data: AvailableCashResponse) => void,
+  ): void {
+    this.subscribeTo({ type: "availableCash" }, callback);
+  }
+
+  public subscribeToAvailableSize(
+    exchangeId: string,
+    instrumentId: string,
+    callback?: (data: AvailableSizeResponse) => void,
+  ): void {
+    this.subscribeTo(
+      {
+        type: "availableSize",
+        parameters: { exchangeId, instrumentId },
+      },
+      callback,
+    );
+  }
+
+  public subscribeToCash(callback?: (data: CashResponse) => void): void {
+    this.subscribeTo({ type: "cash" }, callback);
+  }
+
+  public subscribeToCollection(
+    view: "carousel" = "carousel",
+    collectionId?: string,
+    callback?: (data: CollectionResponse) => void,
+  ): void {
+    const payload: any = { type: "collection", view };
+    if (collectionId) payload.collectionId = collectionId;
+    this.subscribeTo(payload, callback);
+  }
+
+  public subscribeToCompactPortfolioByType(
+    secAccNo: string,
+    callback?: (data: CompactPortfolioByTypeResponse) => void,
+  ): void {
+    this.subscribeTo({ type: "compactPortfolioByType", secAccNo }, callback);
+  }
+
   public subscribeToCustomerPermissions(
-    callback?: (data: CustomerPermissionsPayload) => void,
+    callback?: (data: CustomerPermissionsResponse) => void,
   ): void {
     this.subscribeTo({ type: "customerPermissions" }, callback);
+  }
+
+  public subscribeToDerivatives(
+    jurisdiction: string,
+    underlying: string,
+    productCategory: "factorCertificate" | "knockOutProduct" | "vanillaWarrant",
+    options?: {
+      lang?: string;
+      factor?: number;
+      leverage?: number;
+      strike?: number;
+      sortBy?: string;
+      sortDirection?: "asc" | "desc";
+      optionType?: "long" | "short" | "call" | "put";
+      pageSize?: number;
+      after?: string;
+    },
+    callback?: (data: DerivativesResponse) => void,
+  ): void {
+    this.subscribeTo(
+      {
+        type: "derivatives",
+        jurisdiction,
+        underlying,
+        productCategory,
+        ...options,
+      },
+      callback,
+    );
+  }
+
+  public subscribeToFincrimeBanner(
+    callback?: (data: FincrimeBannerResponse) => void,
+  ): void {
+    this.subscribeTo({ type: "fincrimeBanner" }, callback);
+  }
+
+  public subscribeToFrontendExperiment(
+    operation: "assignment" | "exposure",
+    experimentId: string,
+    identifier: string,
+    callback?: (data: FrontendExperimentResponse) => void,
+  ): void {
+    this.subscribeTo(
+      {
+        type: "frontendExperiment",
+        operation,
+        experimentId,
+        identifier,
+      },
+      callback,
+    );
+  }
+
+  public subscribeToHomeInstrumentExchange(
+    id: string,
+    callback?: (data: HomeInstrumentExchangeResponse) => void,
+  ): void {
+    this.subscribeTo({ type: "homeInstrumentExchange", id }, callback);
+  }
+
+  public subscribeToInstrument(
+    id: string,
+    callback?: (data: InstrumentResponse) => void,
+  ): void {
+    this.subscribeTo({ type: "instrument", id }, callback);
+  }
+
+  public subscribeToNamedWatchlist(
+    watchlistId: string,
+    callback?: (data: NamedWatchlistResponse) => void,
+  ): void {
+    this.subscribeTo({ type: "namedWatchlist", watchlistId }, callback);
+  }
+
+  public subscribeToNeonNews(
+    isin: string,
+    callback?: (data: NeonNewsResponse) => void,
+  ): void {
+    this.subscribeTo({ type: "neonNews", isin }, callback);
+  }
+
+  public subscribeToNeonSearch(
+    searchData: NeonSearchData,
+    callback?: (data: NeonSearchResponse) => void,
+  ): void {
+    this.subscribeTo({ type: "neonSearch", data: searchData }, callback);
+  }
+
+  public subscribeToNeonSearchSuggestedTags(
+    query: string,
+    callback?: (data: NeonSearchSuggestedTagsResponse) => void,
+  ): void {
+    this.subscribeTo({ type: "neonSearchSuggestedTags", data: { q: query } }, callback);
+  }
+
+  public subscribeToOrders(
+    terminated: boolean,
+    callback?: (data: OrdersResponse) => void,
+  ): void {
+    this.subscribeTo({ type: "orders", terminated }, callback);
+  }
+
+  public subscribeToPerformance(
+    id: string,
+    callback?: (data: PerformanceResponse) => void,
+  ): void {
+    this.subscribeTo({ type: "performance", id }, callback);
+  }
+
+  public subscribeToPortfolioStatus(
+    callback?: (data: PortfolioStatusResponse) => void,
+  ): void {
+    this.subscribeTo({ type: "portfolioStatus" }, callback);
+  }
+
+  public subscribeToPriceForOrder(
+    exchangeId: string,
+    instrumentId: string,
+    callback?: (data: PriceForOrderResponse) => void,
+  ): void {
+    this.subscribeTo(
+      {
+        type: "priceForOrder",
+        parameters: { exchangeId, instrumentId },
+      },
+      callback,
+    );
+  }
+
+  public subscribeToSavingsPlans(
+    secAccNo: string,
+    callback?: (data: SavingsPlansResponse) => void,
+  ): void {
+    this.subscribeTo({ type: "savingsPlans", secAccNo }, callback);
+  }
+
+  public subscribeToStockDetails(
+    id: string,
+    callback?: (data: StockDetailsResponse) => void,
+  ): void {
+    this.subscribeTo({ type: "stockDetails", id }, callback);
+  }
+
+  public subscribeToTicker(id: string, callback?: (data: TickerResponse) => void): void {
+    this.subscribeTo({ type: "ticker", id }, callback);
+  }
+
+  public subscribeToTimelineActionsV2(
+    callback?: (data: TimelineActionsV2Response) => void,
+  ): void {
+    this.subscribeTo({ type: "timelineActionsV2" }, callback);
+  }
+
+  public subscribeToTimelineActivityLog(
+    callback?: (data: TimelineActivityLogResponse) => void,
+  ): void {
+    this.subscribeTo({ type: "timelineActivityLog" }, callback);
+  }
+
+  public subscribeToTimelineDetailV2(
+    id: string,
+    callback?: (data: TimelineDetailV2Response) => void,
+  ): void {
+    this.subscribeTo({ type: "timelineDetailV2", id }, callback);
+  }
+
+  public subscribeToTimelineSavingsPlanOverview(
+    savingsPlanId: string,
+    callback?: (data: TimelineSavingsPlanOverviewResponse) => void,
+  ): void {
+    this.subscribeTo({ type: "timelineSavingsPlanOverview", savingsPlanId }, callback);
+  }
+
+  public subscribeToTimelineTransactions(
+    callback?: (data: TimelineTransactionsResponse) => void,
+  ): void {
+    this.subscribeTo({ type: "timelineTransactions" }, callback);
+  }
+
+  public subscribeToTradingPerkConditionStatus(
+    callback?: (data: TradingPerkConditionStatusResponse) => void,
+  ): void {
+    this.subscribeTo({ type: "tradingPerkConditionStatus" }, callback);
+  }
+
+  public subscribeToWatchlists(callback?: (data: WatchlistsResponse) => void): void {
+    this.subscribeTo({ type: "watchlists" }, callback);
+  }
+
+  public subscribeToYieldToMaturity(
+    id: string,
+    callback?: (data: YieldToMaturityResponse) => void,
+  ): void {
+    this.subscribeTo({ type: "yieldToMaturity", id }, callback);
   }
 }
