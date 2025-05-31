@@ -1,4 +1,5 @@
 example.ts
+cookies.json
 # dependencies (bun install)
 node_modules
 

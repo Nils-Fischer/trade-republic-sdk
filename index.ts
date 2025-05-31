@@ -41,7 +41,7 @@ export class TradeRepublicClient {
    * Completes the login process using the OTP received on the user's device.
    * Must be called after initiateLogin().
    */
-  public async completeLogin(otpCode: string): Promise<void> {
+  public async completeLogin(otpCode: string): Promise<string[]> {
     if (!this.processId) {
       return Promise.reject(
         new Error("Login not initiated. Call initiateLogin() first."),
@@ -64,6 +64,25 @@ export class TradeRepublicClient {
 
     this.sessionCookies = extractCookiesFromResponse(response);
     this.ws = new TRWebSocket(this.sessionCookies, this.language);
+    return this.sessionCookies;
+  }
+
+  /**
+   * Authenticates using existing session cookies.
+   * This bypasses the normal login flow - ensure cookies are valid and secure.
+   * @param cookies Array of session cookies from a previous authenticated session
+   */
+  public async loginWithCookies(cookies: string[]): Promise<string[]> {
+    if (!cookies || cookies.length === 0) {
+      return Promise.reject(new Error("Invalid cookies provided"));
+    }
+
+    this.processId = null;
+    this.initialCookies = [];
+
+    this.sessionCookies = cookies;
+    this.ws = new TRWebSocket(this.sessionCookies, this.language);
+    return this.sessionCookies;
   }
 
   /**
