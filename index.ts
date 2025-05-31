@@ -1,13 +1,17 @@
+import { EventEmitter } from "eventemitter3";
 import { LoginResponseDataSchema } from "./types";
 import { extractCookiesFromResponse, makeSignedRequest } from "./utils";
+import { createWebSocket } from "./websocketFactory";
 
-export class TradeRepublicClient {
+export class TradeRepublicClient extends EventEmitter {
   private processId: string | null = null;
   private initialCookies: string[] = [];
   private sessionCookies: string[] = [];
   private language: string;
+  private ws: WebSocket | null = null;
 
   constructor(language: string = "en") {
+    super();
     this.language = language;
   }
 
@@ -31,8 +35,6 @@ export class TradeRepublicClient {
     const data = LoginResponseDataSchema.parse(await response.json());
     this.processId = data.processId;
     this.initialCookies = extractCookiesFromResponse(response);
-
-    console.log("Login initiated. OTP has been sent to your device.");
   }
 
   /**
@@ -61,7 +63,6 @@ export class TradeRepublicClient {
     );
 
     this.sessionCookies = extractCookiesFromResponse(response);
-    console.log("Login completed successfully.");
   }
 
   /**
@@ -238,5 +239,103 @@ export class TradeRepublicClient {
     this.processId = null;
     this.initialCookies = [];
     this.sessionCookies = [];
+  }
+
+  /**
+   * Checks if WebSocket is connected and ready.
+   */
+  public isWebSocketConnected(): boolean {
+    return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
+  }
+
+  /**
+   * Sends a raw message to the WebSocket.
+   */
+  public sendMessage(message: string): void {
+    if (!this.isWebSocketConnected()) {
+      throw new Error("WebSocket is not connected.");
+    }
+    this.ws!.send(message);
+  }
+
+  /**
+   * Subscribes to a data feed.
+   */
+  public subscribe(requestId: string, payload: object): void {
+    const message = `sub ${requestId} ${JSON.stringify(payload)}`;
+    this.sendMessage(message);
+  }
+
+  /**
+   * Unsubscribes from a data feed.
+   */
+  public unsubscribe(requestId: string, payload: object): void {
+    const message = `unsub ${requestId} ${JSON.stringify(payload)}`;
+    this.sendMessage(message);
+  }
+
+  /**
+   * Closes the WebSocket connection.
+   */
+  public disconnectWebSocket(): void {
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
+  }
+
+  /**
+   * Establishes a WebSocket connection with authentication cookies.
+   * Requires successful authentication.
+   */
+  public async connectWebSocket(
+    url: string = "wss://api.traderepublic.com",
+  ): Promise<void> {
+    if (this.sessionCookies.length === 0) {
+      throw new Error(
+        "Not authenticated. Call initiateLogin() and completeLogin() first.",
+      );
+    }
+
+    try {
+      // Convert cookies array to cookie header string
+      const cookieHeader = this.sessionCookies.join("; ");
+
+      const wsClient = await createWebSocket(url, undefined, {
+        Cookie: cookieHeader,
+        Origin: "https://app.traderepublic.com",
+      });
+
+      wsClient.onopen = () => {
+        const requestId = "31";
+        const payload = {
+          locale: this.language,
+          platformId: "webtrading",
+          clientId: "app.traderepublic.com",
+          clientVersion: "3.181.1", // TODO: get this from the app
+        };
+        const connectMessage = `connect ${requestId} ${JSON.stringify(payload)}`;
+
+        wsClient.send(connectMessage);
+        this.emit("open");
+      };
+
+      wsClient.onmessage = (event) => {
+        this.emit("message", event.data);
+      };
+
+      wsClient.onerror = (error) => {
+        this.emit("error", error);
+      };
+
+      wsClient.onclose = (event) => {
+        this.emit("close", event);
+      };
+
+      this.ws = wsClient as any; // Store reference if needed
+    } catch (error) {
+      this.emit("error", error);
+      throw error;
+    }
   }
 }
