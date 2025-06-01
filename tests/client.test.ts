@@ -1,0 +1,168 @@
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { existsSync, readFileSync } from "fs";
+import { join } from "path";
+import { TradeRepublicClient } from "../index";
+
+const COOKIES_FILE = join(process.cwd(), "test-cookies.json");
+
+function loadTestCookies(): string[] | null {
+  try {
+    if (!existsSync(COOKIES_FILE)) {
+      return null;
+    }
+
+    const cookiesData = readFileSync(COOKIES_FILE, "utf-8");
+    const cookies = JSON.parse(cookiesData);
+
+    if (!Array.isArray(cookies) || cookies.length === 0) {
+      return null;
+    }
+
+    return cookies;
+  } catch (error) {
+    return null;
+  }
+}
+
+describe("TradeRepublicClient", () => {
+  let client: TradeRepublicClient;
+
+  beforeAll(async () => {
+    // Load test cookies that should be set up by running: bun run test:setup
+    const cookies = loadTestCookies();
+    if (!cookies) {
+      throw new Error(
+        'No test cookies found. Please run "bun run test:setup" first to authenticate.',
+      );
+    }
+
+    client = new TradeRepublicClient();
+    await client.loginWithCookies(cookies);
+  });
+
+  afterAll(() => {
+    if (client) {
+      client.logout();
+    }
+  });
+
+  describe("Authentication", () => {
+    test("should be authenticated after setup", () => {
+      expect(client.isAuthenticated()).toBe(true);
+    });
+
+    test("should have a valid WebSocket instance", () => {
+      expect(client.ws).toBeDefined();
+      expect(typeof client.ws.connectWebSocket).toBe("function");
+    });
+  });
+
+  describe("Account Information", () => {
+    test("should fetch account information", async () => {
+      const accountInfo = await client.getAccountInfo();
+      expect(accountInfo).toBeDefined();
+      expect(typeof accountInfo).toBe("object");
+    });
+
+    test("should fetch personal details", async () => {
+      const personalDetails = await client.getPersonalDetails();
+      expect(personalDetails).toBeDefined();
+      expect(typeof personalDetails).toBe("object");
+    });
+
+    test("should fetch payment methods", async () => {
+      const paymentMethods = await client.getPaymentMethods();
+      expect(paymentMethods).toBeDefined();
+      expect(typeof paymentMethods).toBe("object");
+    });
+  });
+
+  describe("Financial Data", () => {
+    test("should fetch trending stocks", async () => {
+      const trendingStocks = await client.getTrendingStocks();
+      expect(trendingStocks).toBeDefined();
+      expect(typeof trendingStocks).toBe("object");
+    });
+  });
+
+  describe("Tax Information", () => {
+    test("should fetch tax exemption orders", async () => {
+      const taxExemptionOrders = await client.getTaxExemptionOrders();
+      expect(taxExemptionOrders).toBeDefined();
+      expect(typeof taxExemptionOrders).toBe("object");
+    });
+
+    test("should fetch tax residency information", async () => {
+      const taxResidency = await client.getTaxResidency();
+      expect(taxResidency).toBeDefined();
+      expect(typeof taxResidency).toBe("object");
+    });
+
+    test("should fetch tax information", async () => {
+      const taxInformation = await client.getTaxInformation();
+      expect(taxInformation).toBeDefined();
+      expect(typeof taxInformation).toBe("object");
+    });
+  });
+
+  describe("Documents", () => {
+    test("should fetch all documents", async () => {
+      const allDocuments = await client.getAllDocuments();
+      expect(allDocuments).toBeDefined();
+      expect(typeof allDocuments).toBe("object");
+    });
+  });
+
+  describe("Error Handling", () => {
+    test("should handle unauthenticated requests properly", async () => {
+      const unauthenticatedClient = new TradeRepublicClient();
+
+      try {
+        await unauthenticatedClient.getAccountInfo();
+        expect(true).toBe(false); // Should not reach here
+      } catch (error) {
+        expect(error.message).toContain("Not authenticated");
+      }
+    });
+
+    test("should handle incomplete login flow", async () => {
+      const incompleteClient = new TradeRepublicClient();
+
+      try {
+        await incompleteClient.completeLogin("1234");
+        expect(true).toBe(false); // Should not reach here
+      } catch (error) {
+        expect(error.message).toContain("Login not initiated");
+      }
+    });
+
+    test("should handle invalid cookies", async () => {
+      const invalidCookieClient = new TradeRepublicClient();
+
+      try {
+        await invalidCookieClient.loginWithCookies([]);
+        expect(true).toBe(false); // Should not reach here
+      } catch (error) {
+        expect(error.message).toContain("Invalid cookies provided");
+      }
+    });
+  });
+
+  describe("Client State Management", () => {
+    test("should properly logout and clear state", () => {
+      const testClient = new TradeRepublicClient();
+      testClient.logout();
+
+      expect(testClient.isAuthenticated()).toBe(false);
+    });
+
+    test("should maintain language setting", () => {
+      const germanClient = new TradeRepublicClient("de");
+      const englishClient = new TradeRepublicClient("en");
+
+      // Language is private, but we can test that different instances can be created
+      expect(germanClient).toBeInstanceOf(TradeRepublicClient);
+      expect(englishClient).toBeInstanceOf(TradeRepublicClient);
+    });
+  });
+});

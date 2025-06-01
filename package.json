@@ -20,7 +20,10 @@
     "build": "tsc",
     "dev": "bun run example.ts",
     "format": "prettier --write .",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "test": "bun test tests/",
+    "test:setup": "bun run tests/test-runner.ts",
+    "test:watch": "bun test tests/ --watch"
   },
   "keywords": [
     "trade-republic",
