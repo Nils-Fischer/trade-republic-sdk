@@ -136,7 +136,7 @@ export const TaxExemptionOrdersSchema = TaxExemptionOrderSchema;
 
 export type TaxExemptionOrders = z.infer<typeof TaxExemptionOrdersSchema>;
 
-export const personalDetailsSchema = z.object({
+export const PersonalDetailsSchema = z.object({
   phoneNumber: z.string(),
   verifiedEmail: z.string(),
   unverifiedEmail: z.string().nullable(),
@@ -167,7 +167,7 @@ export const personalDetailsSchema = z.object({
   ),
 });
 
-export type PersonalDetails = z.infer<typeof personalDetailsSchema>;
+export type PersonalDetails = z.infer<typeof PersonalDetailsSchema>;
 
 const AdditionalDataSchema = z
   .object({

@@ -6,7 +6,7 @@ import {
   AccountInfoSchema,
   AllDocumentsSchema,
   PaymentMethodsSchema,
-  personalDetailsSchema,
+  PersonalDetailsSchema,
   TaxExemptionOrdersSchema,
   TaxInformationSchema,
   TaxResidencySchema,
@@ -85,7 +85,7 @@ describe("TradeRepublicClient", () => {
       expect(personalDetails).toBeDefined();
 
       // Validate that the response matches the exact schema format
-      const validationResult = personalDetailsSchema.safeParse(personalDetails);
+      const validationResult = PersonalDetailsSchema.safeParse(personalDetails);
       expect(validationResult.success).toBe(true);
       if (!validationResult.success) {
         console.error(
