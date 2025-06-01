@@ -1,4 +1,14 @@
-import { LoginResponseDataSchema } from "./types";
+import {
+  AccountInfo,
+  AllDocuments,
+  LoginResponseDataSchema,
+  PaymentMethods,
+  PersonalDetails,
+  TaxExemptionOrders,
+  TaxInformation,
+  TaxResidency,
+  TrendingStocks,
+} from "./types";
 import { extractCookiesFromResponse, makeSignedRequest } from "./utils";
 import { TRWebSocket } from "./websocket";
 
@@ -88,7 +98,7 @@ export class TradeRepublicClient {
   /**
    * Retrieves account information. Requires successful authentication.
    */
-  public async getAccountInfo(): Promise<unknown> {
+  public async getAccountInfo(): Promise<AccountInfo> {
     if (this.sessionCookies.length === 0) {
       return Promise.reject(
         new Error("Not authenticated. Call initiateLogin() and completeLogin() first."),
@@ -108,7 +118,7 @@ export class TradeRepublicClient {
   /**
    * Retrieves trending stocks. Requires successful authentication.
    */
-  public async getTrendingStocks(): Promise<unknown> {
+  public async getTrendingStocks(): Promise<TrendingStocks> {
     if (this.sessionCookies.length === 0) {
       return Promise.reject(
         new Error("Not authenticated. Call initiateLogin() and completeLogin() first."),
@@ -128,7 +138,7 @@ export class TradeRepublicClient {
   /**
    * Retrieves tax exemption orders. Requires successful authentication.
    */
-  public async getTaxExemptionOrders(): Promise<unknown> {
+  public async getTaxExemptionOrders(): Promise<TaxExemptionOrders> {
     if (this.sessionCookies.length === 0) {
       return Promise.reject(
         new Error("Not authenticated. Call initiateLogin() and completeLogin() first."),
@@ -148,7 +158,7 @@ export class TradeRepublicClient {
   /**
    * Retrieves customer personal details. Requires successful authentication.
    */
-  public async getPersonalDetails(): Promise<unknown> {
+  public async getPersonalDetails(): Promise<PersonalDetails> {
     if (this.sessionCookies.length === 0) {
       return Promise.reject(
         new Error("Not authenticated. Call initiateLogin() and completeLogin() first."),
@@ -168,7 +178,7 @@ export class TradeRepublicClient {
   /**
    * Retrieves payment methods. Requires successful authentication.
    */
-  public async getPaymentMethods(): Promise<unknown> {
+  public async getPaymentMethods(): Promise<PaymentMethods> {
     if (this.sessionCookies.length === 0) {
       return Promise.reject(
         new Error("Not authenticated. Call initiateLogin() and completeLogin() first."),
@@ -188,7 +198,7 @@ export class TradeRepublicClient {
   /**
    * Retrieves tax residency information. Requires successful authentication.
    */
-  public async getTaxResidency(): Promise<unknown> {
+  public async getTaxResidency(): Promise<TaxResidency> {
     if (this.sessionCookies.length === 0) {
       return Promise.reject(
         new Error("Not authenticated. Call initiateLogin() and completeLogin() first."),
@@ -208,7 +218,7 @@ export class TradeRepublicClient {
   /**
    * Retrieves tax information. Requires successful authentication.
    */
-  public async getTaxInformation(): Promise<unknown> {
+  public async getTaxInformation(): Promise<TaxInformation> {
     if (this.sessionCookies.length === 0) {
       return Promise.reject(
         new Error("Not authenticated. Call initiateLogin() and completeLogin() first."),
@@ -228,7 +238,7 @@ export class TradeRepublicClient {
   /**
    * Retrieves all documents. Requires successful authentication.
    */
-  public async getAllDocuments(): Promise<unknown> {
+  public async getAllDocuments(): Promise<AllDocuments> {
     if (this.sessionCookies.length === 0) {
       return Promise.reject(
         new Error("Not authenticated. Call initiateLogin() and completeLogin() first."),
