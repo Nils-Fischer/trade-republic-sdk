@@ -19,7 +19,7 @@ export type AccountPairsResponse = z.infer<typeof AccountPairsResponseSchema>;
 export const AggregateHistoryLightRequestSchema = z.object({
   type: z.literal("aggregateHistoryLight"),
   range: z.literal("1d"),
-  id: z.string().regex(/^[A-Z0-9]+\\.[A-Z]{2,3}$/),
+  id: z.string().regex(/^[A-Z0-9]+\.[A-Z]{2,3}$/),
   resolution: z.number().optional(),
 });
 
@@ -105,7 +105,7 @@ export const CollectionRequestSchema = z.object({
 
 export type CollectionRequest = z.infer<typeof CollectionRequestSchema>;
 
-const ImageDetailSchema = z.object({
+export const ImageDetailSchema = z.object({
   width: z.number(),
   height: z.number(),
   scale: z.number(),
@@ -114,10 +114,20 @@ const ImageDetailSchema = z.object({
   url_next_gen_icon: z.string().optional(),
 });
 
-const CoverSchema = z.object({
+export const ImageDetailSchemaRequired = ImageDetailSchema.extend({
+  url_next_gen_icon: z.string(),
+});
+
+export const CoverSchema = z.object({
   small: z.array(ImageDetailSchema),
   medium: z.array(ImageDetailSchema.omit({ url_next_gen_icon: true })),
   large: z.array(ImageDetailSchema.omit({ url_next_gen_icon: true })),
+});
+
+export const CoverSchemaWithRequiredIcon = z.object({
+  small: z.array(ImageDetailSchemaRequired),
+  medium: z.array(ImageDetailSchemaRequired.omit({ url_next_gen_icon: true })),
+  large: z.array(ImageDetailSchemaRequired.omit({ url_next_gen_icon: true })),
 });
 
 const WatchlistSchema = z.object({
@@ -389,36 +399,7 @@ export type NamedWatchlistRequest = z.infer<typeof NamedWatchlistRequestSchema>;
 
 export const NamedWatchlistResponseSchema = z.object({
   id: z.string(),
-  cover: z.object({
-    small: z.array(
-      z.object({
-        width: z.number(),
-        height: z.number(),
-        scale: z.number(),
-        url: z.string(),
-        url_next_gen: z.string(),
-        url_next_gen_icon: z.string().optional(),
-      }),
-    ),
-    medium: z.array(
-      z.object({
-        width: z.number(),
-        height: z.number(),
-        scale: z.number(),
-        url: z.string(),
-        url_next_gen: z.string(),
-      }),
-    ),
-    large: z.array(
-      z.object({
-        width: z.number(),
-        height: z.number(),
-        scale: z.number(),
-        url: z.string(),
-        url_next_gen: z.string(),
-      }),
-    ),
-  }),
+  cover: CoverSchema,
   size: z.number(),
   title: z.string(),
   description: z.string().nullable(),
@@ -930,36 +911,7 @@ export const WatchlistsResponseSchema = z.object({
   watchlists: z.array(
     z.object({
       id: z.string(),
-      cover: z.object({
-        small: z.array(
-          z.object({
-            width: z.number(),
-            height: z.number(),
-            scale: z.number(),
-            url: z.string(),
-            url_next_gen: z.string(),
-            url_next_gen_icon: z.string(),
-          }),
-        ),
-        medium: z.array(
-          z.object({
-            width: z.number(),
-            height: z.number(),
-            scale: z.number(),
-            url: z.string(),
-            url_next_gen: z.string(),
-          }),
-        ),
-        large: z.array(
-          z.object({
-            width: z.number(),
-            height: z.number(),
-            scale: z.number(),
-            url: z.string(),
-            url_next_gen: z.string(),
-          }),
-        ),
-      }),
+      cover: CoverSchemaWithRequiredIcon,
       size: z.number(),
       title: z.string(),
       description: z.any().nullable(),
