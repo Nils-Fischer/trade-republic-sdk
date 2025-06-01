@@ -2,6 +2,16 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { TradeRepublicClient } from "../index";
+import {
+  AccountInfoSchema,
+  AllDocumentsSchema,
+  PaymentMethodsSchema,
+  personalDetailsSchema,
+  TaxExemptionOrdersSchema,
+  TaxInformationSchema,
+  TaxResidencySchema,
+  TrendingStocksSchema,
+} from "../types";
 
 const COOKIES_FILE = join(process.cwd(), "test-cookies.json");
 
@@ -61,19 +71,40 @@ describe("TradeRepublicClient", () => {
     test("should fetch account information", async () => {
       const accountInfo = await client.getAccountInfo();
       expect(accountInfo).toBeDefined();
-      expect(typeof accountInfo).toBe("object");
+
+      // Validate that the response matches the exact schema format
+      const validationResult = AccountInfoSchema.safeParse(accountInfo);
+      expect(validationResult.success).toBe(true);
+      if (!validationResult.success) {
+        console.error("AccountInfo validation errors:", validationResult.error.issues);
+      }
     });
 
     test("should fetch personal details", async () => {
       const personalDetails = await client.getPersonalDetails();
       expect(personalDetails).toBeDefined();
-      expect(typeof personalDetails).toBe("object");
+
+      // Validate that the response matches the exact schema format
+      const validationResult = personalDetailsSchema.safeParse(personalDetails);
+      expect(validationResult.success).toBe(true);
+      if (!validationResult.success) {
+        console.error(
+          "PersonalDetails validation errors:",
+          validationResult.error.issues,
+        );
+      }
     });
 
     test("should fetch payment methods", async () => {
       const paymentMethods = await client.getPaymentMethods();
       expect(paymentMethods).toBeDefined();
-      expect(typeof paymentMethods).toBe("object");
+
+      // Validate that the response matches the exact schema format
+      const validationResult = PaymentMethodsSchema.safeParse(paymentMethods);
+      expect(validationResult.success).toBe(true);
+      if (!validationResult.success) {
+        console.error("PaymentMethods validation errors:", validationResult.error.issues);
+      }
     });
   });
 
@@ -81,7 +112,13 @@ describe("TradeRepublicClient", () => {
     test("should fetch trending stocks", async () => {
       const trendingStocks = await client.getTrendingStocks();
       expect(trendingStocks).toBeDefined();
-      expect(typeof trendingStocks).toBe("object");
+
+      // Validate that the response matches the exact schema format
+      const validationResult = TrendingStocksSchema.safeParse(trendingStocks);
+      expect(validationResult.success).toBe(true);
+      if (!validationResult.success) {
+        console.error("TrendingStocks validation errors:", validationResult.error.issues);
+      }
     });
   });
 
@@ -89,19 +126,40 @@ describe("TradeRepublicClient", () => {
     test("should fetch tax exemption orders", async () => {
       const taxExemptionOrders = await client.getTaxExemptionOrders();
       expect(taxExemptionOrders).toBeDefined();
-      expect(typeof taxExemptionOrders).toBe("object");
+
+      // Validate that the response matches the exact schema format
+      const validationResult = TaxExemptionOrdersSchema.safeParse(taxExemptionOrders);
+      expect(validationResult.success).toBe(true);
+      if (!validationResult.success) {
+        console.error(
+          "TaxExemptionOrders validation errors:",
+          validationResult.error.issues,
+        );
+      }
     });
 
     test("should fetch tax residency information", async () => {
       const taxResidency = await client.getTaxResidency();
       expect(taxResidency).toBeDefined();
-      expect(typeof taxResidency).toBe("object");
+
+      // Validate that the response matches the exact schema format
+      const validationResult = TaxResidencySchema.safeParse(taxResidency);
+      expect(validationResult.success).toBe(true);
+      if (!validationResult.success) {
+        console.error("TaxResidency validation errors:", validationResult.error.issues);
+      }
     });
 
     test("should fetch tax information", async () => {
       const taxInformation = await client.getTaxInformation();
       expect(taxInformation).toBeDefined();
-      expect(typeof taxInformation).toBe("object");
+
+      // Validate that the response matches the exact schema format
+      const validationResult = TaxInformationSchema.safeParse(taxInformation);
+      expect(validationResult.success).toBe(true);
+      if (!validationResult.success) {
+        console.error("TaxInformation validation errors:", validationResult.error.issues);
+      }
     });
   });
 
@@ -109,7 +167,13 @@ describe("TradeRepublicClient", () => {
     test("should fetch all documents", async () => {
       const allDocuments = await client.getAllDocuments();
       expect(allDocuments).toBeDefined();
-      expect(typeof allDocuments).toBe("object");
+
+      // Validate that the response matches the exact schema format
+      const validationResult = AllDocumentsSchema.safeParse(allDocuments);
+      expect(validationResult.success).toBe(true);
+      if (!validationResult.success) {
+        console.error("AllDocuments validation errors:", validationResult.error.issues);
+      }
     });
   });
 
