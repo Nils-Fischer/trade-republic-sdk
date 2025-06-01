@@ -1,7 +1,4 @@
 import { z } from "zod";
-export const AccountPairsRequestSchema = z.object({ type: z.literal("accountPairs") });
-
-export type AccountPairsRequest = z.infer<typeof AccountPairsRequestSchema>;
 
 export const AccountPairsResponseSchema = z.object({
   authAccountId: z.string().uuid(),
@@ -17,9 +14,8 @@ export const AccountPairsResponseSchema = z.object({
 export type AccountPairsResponse = z.infer<typeof AccountPairsResponseSchema>;
 
 export const AggregateHistoryLightRequestSchema = z.object({
-  type: z.literal("aggregateHistoryLight"),
   range: z.literal("1d"),
-  id: z.string().regex(/^[A-Z0-9]+\.[A-Z]{2,3}$/),
+  id: z.string().regex(/^[A-Z0-9.]+\.[A-Z]{2,6}$/),
   resolution: z.number().optional(),
 });
 
@@ -48,23 +44,11 @@ export type AggregateHistoryLightResponse = z.infer<
   typeof AggregateHistoryLightResponseSchema
 >;
 
-export const AvailableCashRequestSchema = z.object({ type: z.literal("availableCash") });
-
-export type AvailableCashRequest = z.infer<typeof AvailableCashRequestSchema>;
-
 export const AvailableCashResponseSchema = z.array(
   z.object({ accountNumber: z.string(), currencyId: z.string(), amount: z.number() }),
 );
 
 export type AvailableCashResponse = z.infer<typeof AvailableCashResponseSchema>;
-
-export const AvailableCashForPayoutRequestSchema = z.object({
-  type: z.literal("availableCashForPayout"),
-});
-
-export type AvailableCashForPayoutRequest = z.infer<
-  typeof AvailableCashForPayoutRequestSchema
->;
 
 export const AvailableCashForPayoutResponseSchema = z.array(
   z.object({ accountNumber: z.string(), currencyId: z.string(), amount: z.number() }),
@@ -75,10 +59,9 @@ export type AvailableCashForPayoutResponse = z.infer<
 >;
 
 export const AvailableSizeRequestSchema = z.object({
-  type: z.literal("availableSize"),
   parameters: z.object({
     exchangeId: z.enum(["LSX", "SGL", "UBS"]),
-    instrumentId: z.string().regex(/^[A-Z0-9]+\\.[A-Z]{2,3}$/),
+    instrumentId: z.string().regex(/^[A-Z0-9.]+\.[A-Z]{2,6}$/),
   }),
 });
 
@@ -88,10 +71,6 @@ export const AvailableSizeResponseSchema = z.object({ size: z.string() });
 
 export type AvailableSizeResponse = z.infer<typeof AvailableSizeResponseSchema>;
 
-export const CashRequestSchema = z.object({ type: z.literal("cash") });
-
-export type CashRequest = z.infer<typeof CashRequestSchema>;
-
 export const CashResponseSchema = z.array(
   z.object({ accountNumber: z.string(), currencyId: z.string(), amount: z.number() }),
 );
@@ -99,7 +78,6 @@ export const CashResponseSchema = z.array(
 export type CashResponse = z.infer<typeof CashResponseSchema>;
 
 export const CollectionRequestSchema = z.object({
-  type: z.literal("collection"),
   view: z.literal("carousel"),
 });
 
@@ -159,7 +137,6 @@ export const CollectionResponseSchema = z.object({
 export type CollectionResponse = z.infer<typeof CollectionResponseSchema>;
 
 export const CompactPortfolioByTypeRequestSchema = z.object({
-  type: z.literal("compactPortfolioByType"),
   secAccNo: z.string(),
 });
 
@@ -194,12 +171,6 @@ export type CompactPortfolioByTypeResponse = z.infer<
   typeof CompactPortfolioByTypeResponseSchema
 >;
 
-export const CustomerPermissionsRequestSchema = z.object({
-  type: z.literal("customerPermissions"),
-});
-
-export type CustomerPermissionsRequest = z.infer<typeof CustomerPermissionsRequestSchema>;
-
 export const CustomerPermissionsResponseSchema = z.object({
   permissions: z.array(z.any()),
 });
@@ -209,7 +180,6 @@ export type CustomerPermissionsResponse = z.infer<
 >;
 
 export const DerivativesRequestSchema = z.object({
-  type: z.literal("derivatives"),
   jurisdiction: z.literal("DE"),
   lang: z.literal("en"),
   underlying: z.string().regex(/^[A-Z0-9]+$/),
@@ -251,18 +221,11 @@ export const DerivativesResponseSchema = z.object({
 
 export type DerivativesResponse = z.infer<typeof DerivativesResponseSchema>;
 
-export const FincrimeBannerRequestSchema = z.object({
-  type: z.literal("fincrimeBanner"),
-});
-
-export type FincrimeBannerRequest = z.infer<typeof FincrimeBannerRequestSchema>;
-
 export const FincrimeBannerResponseSchema = z.object({ carouselItems: z.array(z.any()) });
 
 export type FincrimeBannerResponse = z.infer<typeof FincrimeBannerResponseSchema>;
 
 export const FrontendExperimentRequestSchema = z.object({
-  type: z.literal("frontendExperiment"),
   operation: z.enum(["assignment", "exposure"]),
   experimentId: z.enum(["web-portfolio-analytics", "web-show-discover-section"]),
   identifier: z.string().uuid(),
@@ -270,13 +233,14 @@ export const FrontendExperimentRequestSchema = z.object({
 
 export type FrontendExperimentRequest = z.infer<typeof FrontendExperimentRequestSchema>;
 
-export const FrontendExperimentResponseSchema = z.object({ group: z.number() });
+export const FrontendExperimentResponseSchema = z.object({
+  group: z.number().optional(),
+});
 
 export type FrontendExperimentResponse = z.infer<typeof FrontendExperimentResponseSchema>;
 
 export const HomeInstrumentExchangeRequestSchema = z.object({
-  type: z.literal("homeInstrumentExchange"),
-  id: z.string().regex(/^[A-Z0-9]+\\.[A-Z]{2,3}$/),
+  id: z.string().regex(/^[A-Z0-9.]+\.[A-Z]{2,6}$/),
 });
 
 export type HomeInstrumentExchangeRequest = z.infer<
@@ -301,8 +265,7 @@ export type HomeInstrumentExchangeResponse = z.infer<
 >;
 
 export const InstrumentRequestSchema = z.object({
-  type: z.literal("instrument"),
-  id: z.string().regex(/^[A-Z0-9]+\\.[A-Z]{2,3}$/),
+  id: z.string().regex(/^[A-Z0-9.]+\.[A-Z]{2,6}$/),
   jurisdiction: z.literal("DE"),
 });
 
@@ -391,7 +354,6 @@ export const InstrumentResponseSchema = z.object({
 export type InstrumentResponse = z.infer<typeof InstrumentResponseSchema>;
 
 export const NamedWatchlistRequestSchema = z.object({
-  type: z.literal("namedWatchlist"),
   watchlistId: z.union([z.literal("favorites"), z.string().uuid()]),
 });
 
@@ -427,7 +389,6 @@ export const NamedWatchlistResponseSchema = z.object({
 export type NamedWatchlistResponse = z.infer<typeof NamedWatchlistResponseSchema>;
 
 export const NeonNewsRequestSchema = z.object({
-  type: z.literal("neonNews"),
   isin: z.string().regex(/^[A-Z0-9]+$/),
 });
 
@@ -447,7 +408,6 @@ export const NeonNewsResponseSchema = z.array(
 export type NeonNewsResponse = z.infer<typeof NeonNewsResponseSchema>;
 
 export const NeonSearchRequestSchema = z.object({
-  type: z.literal("neonSearch"),
   data: z.object({
     q: z.string(),
     page: z.number(),
@@ -495,7 +455,6 @@ export const NeonSearchResponseSchema = z.object({
 export type NeonSearchResponse = z.infer<typeof NeonSearchResponseSchema>;
 
 export const NeonSearchSuggestedTagRequestSchema = z.object({
-  type: z.literal("neonSearchSuggestedTags"),
   data: z.object({ q: z.string() }),
 });
 
@@ -512,7 +471,6 @@ export type NeonSearchSuggestedTagResponse = z.infer<
 >;
 
 export const OrdersRequestSchema = z.object({
-  type: z.literal("orders"),
   terminated: z.boolean(),
 });
 
@@ -526,8 +484,7 @@ export const OrdersResponseSchema = z.object({
 export type OrdersResponse = z.infer<typeof OrdersResponseSchema>;
 
 export const PerformanceRequestSchema = z.object({
-  type: z.literal("performance"),
-  id: z.string().regex(/^[A-Z0-9]+\\.[A-Z]{2,3}$/),
+  id: z.string().regex(/^[A-Z0-9.]+\.[A-Z]{2,6}$/),
 });
 
 export type PerformanceRequest = z.infer<typeof PerformanceRequestSchema>;
@@ -547,12 +504,6 @@ export const PerformanceResponseSchema = z.object({
 });
 
 export type PerformanceResponse = z.infer<typeof PerformanceResponseSchema>;
-
-export const PortfolioStatusRequestSchema = z.object({
-  type: z.literal("portfolioStatus"),
-});
-
-export type PortfolioStatusRequest = z.infer<typeof PortfolioStatusRequestSchema>;
 
 export const PortfolioStatusResponseSchema = z.object({
   status: z.string(),
@@ -582,10 +533,9 @@ export const PriceForOrderResponseSchema = z.object({
 export type PriceForOrderResponse = z.infer<typeof PriceForOrderResponseSchema>;
 
 export const PriceForOrderRequestSchema = z.object({
-  type: z.literal("priceForOrder"),
   parameters: z.object({
     exchangeId: z.enum(["LSX", "SGL", "UBS"]),
-    instrumentId: z.string().regex(/^[A-Z0-9]+\\.[A-Z]{2,3}$/),
+    instrumentId: z.string().regex(/^[A-Z0-9.]+\.[A-Z]{2,6}$/),
     type: z.enum(["buy", "sell"]),
   }),
 });
@@ -593,7 +543,6 @@ export const PriceForOrderRequestSchema = z.object({
 export type PriceForOrderRequest = z.infer<typeof PriceForOrderRequestSchema>;
 
 export const SavingsPlansRequestSchema = z.object({
-  type: z.literal("savingsPlans"),
   secAccNo: z.string(),
 });
 
@@ -630,7 +579,6 @@ export const SavingsPlansResponseSchema = z.object({
 export type SavingsPlansResponse = z.infer<typeof SavingsPlansResponseSchema>;
 
 export const SavingsPlanParametersRequestSchema = z.object({
-  type: z.literal("savingsPlanParameters"),
   instrumentId: z.string(),
 });
 
@@ -661,8 +609,7 @@ export type SavingsPlanParametersResponse = z.infer<
 >;
 
 export const StockDetailsRequestSchema = z.object({
-  type: z.literal("stockDetails"),
-  id: z.string().regex(/^[A-Z0-9]+$/),
+  id: z.string().regex(/^[A-Z0-9.]+\.[A-Z]{2,6}$/),
   jurisdiction: z.literal("DE"),
 });
 
@@ -707,8 +654,7 @@ export const StockDetailsResponseSchema = z.object({
 export type StockDetailsResponse = z.infer<typeof StockDetailsResponseSchema>;
 
 export const TickerRequestSchema = z.object({
-  type: z.literal("ticker"),
-  id: z.string().regex(/^[A-Z0-9]{2}[A-Z0-9]{9}\\.[A-Z]{2,3}$/),
+  id: z.string().regex(/^[A-Z0-9.]+\.[A-Z]{2,6}$/),
 });
 
 export type TickerRequest = z.infer<typeof TickerRequestSchema>;
@@ -726,18 +672,13 @@ export const TickerResponseSchema = z.object({
 
 export type TickerResponse = z.infer<typeof TickerResponseSchema>;
 
-export const TimelineActionsV2RequestSchema = z.object({
-  type: z.literal("timelineActionsV2"),
+export const TimelineActionsV2ResponseSchema = z.object({
+  items: z.array(z.any()).optional(),
 });
-
-export type TimelineActionsV2Request = z.infer<typeof TimelineActionsV2RequestSchema>;
-
-export const TimelineActionsV2ResponseSchema = z.object({ items: z.array(z.any()) });
 
 export type TimelineActionsV2Response = z.infer<typeof TimelineActionsV2ResponseSchema>;
 
 export const TimelineDetailV2RequestSchema = z.object({
-  type: z.literal("timelineDetailV2"),
   id: z.string().uuid(),
 });
 
@@ -758,7 +699,7 @@ export const TimelineDetailV2ResponseSchema = z.object({
       }),
       z.object({ title: z.string(), description: z.string(), type: z.literal("banner") }),
       z.object({
-        title: z.string().nullable(),
+        title: z.string(),
         data: z.array(
           z.object({
             title: z.string(),
@@ -844,14 +785,6 @@ export const TimelineDetailV2ResponseSchema = z.object({
 
 export type TimelineDetailV2Response = z.infer<typeof TimelineDetailV2ResponseSchema>;
 
-export const TimelineTransactionsRequestSchema = z.object({
-  type: z.literal("timelineTransactions"),
-});
-
-export type TimelineTransactionsRequest = z.infer<
-  typeof TimelineTransactionsRequestSchema
->;
-
 export const TimelineTransactionsResponseSchema = z.object({
   items: z.array(
     z.object({
@@ -887,14 +820,6 @@ export type TimelineTransactionsResponse = z.infer<
   typeof TimelineTransactionsResponseSchema
 >;
 
-export const TradingPerkConditionStatusRequestSchema = z.object({
-  type: z.literal("tradingPerkConditionStatus"),
-});
-
-export type TradingPerkConditionStatusRequest = z.infer<
-  typeof TradingPerkConditionStatusRequestSchema
->;
-
 export const TradingPerkConditionStatusResponseSchema = z.object({
   tradingPerkConditionStatus: z.any().nullable(),
 });
@@ -902,10 +827,6 @@ export const TradingPerkConditionStatusResponseSchema = z.object({
 export type TradingPerkConditionStatusResponse = z.infer<
   typeof TradingPerkConditionStatusResponseSchema
 >;
-
-export const WatchlistsRequestSchema = z.object({ type: z.literal("watchlists") });
-
-export type WatchlistsRequest = z.infer<typeof WatchlistsRequestSchema>;
 
 export const WatchlistsResponseSchema = z.object({
   watchlists: z.array(
@@ -933,7 +854,6 @@ export const WatchlistsResponseSchema = z.object({
 export type WatchlistsResponse = z.infer<typeof WatchlistsResponseSchema>;
 
 export const YieldToMaturityRequestSchema = z.object({
-  type: z.literal("yieldToMaturity"),
   id: z.string().regex(/^[A-Z0-9]+$/),
 });
 
