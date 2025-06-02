@@ -2,14 +2,18 @@
 
 An unofficial TypeScript/JavaScript SDK for the Trade Republic API.
 
-⚠️ **Disclaimer**: This is an unofficial SDK and is not affiliated with Trade Republic. Use at your own risk.
+⚠️ **Disclaimer**: This is an unofficial SDK and is not affiliated with Trade Republic.
 
 ## Features
 
-- 🔐 Two-step authentication with phone number, PIN, and SMS OTP
+- 🔐 Two-step authentication (phone + PIN + SMS OTP)
+- 📡 REST API methods for account data, trending stocks, documents, etc.
+- 🔌 WebSocket subscriptions for real-time data
 - 🍪 Automatic session cookie management
 - 📘 Full TypeScript support
 - 🎯 Simple, intuitive API
+
+⚠️ **Note**: This SDK is **not complete**. Many API endpoints and WebSocket subscription types are missing, especially on the WebSocket side. Contributions are welcome!
 
 ## Installation
 
@@ -19,6 +23,8 @@ npm install trade-republic-sdk
 
 ## Quick Start
 
+### REST API Usage
+
 ```typescript
 import { TradeRepublicClient } from "trade-republic-sdk";
 
@@ -26,117 +32,108 @@ const client = new TradeRepublicClient();
 
 try {
   // Step 1: Initiate login (sends OTP to your device)
-  await client.initiateLogin("+49151507xxxxx", "1234");
+  await client.initiateLogin("+491xxxxxxxxxx", "1234");
 
   // Step 2: Complete login with OTP received via SMS
   await client.completeLogin("5678");
 
-  // Step 3: Use authenticated client
+  // Step 3: Use REST API methods
   const accountInfo = await client.getAccountInfo();
-  console.log(accountInfo);
+  const trendingStocks = await client.getTrendingStocks();
+
+  console.log(accountInfo, trendingStocks);
 } catch (error) {
-  console.error("Authentication failed:", error);
+  console.error("Error:", error);
 }
 ```
 
-## Authentication Flow
-
-The Trade Republic API uses a two-step authentication process:
-
-1. **Initial Login**: Send phone number and PIN to receive an OTP via SMS
-2. **OTP Verification**: Complete authentication with the received OTP code
-
-### Step-by-Step Example
+### WebSocket Subscriptions
 
 ```typescript
-import { TradeRepublicClient } from "trade-republic-sdk";
+// After authentication, use WebSocket for real-time data
+const ws = client.ws;
 
-const client = new TradeRepublicClient();
+// Subscribe to portfolio updates
+ws.subscribe("portfolio", {}, (data) => {
+  console.log("Portfolio update:", data);
+});
 
-// Step 1: Initiate login
-console.log("Sending login request...");
-await client.initiateLogin(phoneNumber, pin);
-console.log("OTP sent to your device");
+// Subscribe to instrument price updates
+ws.subscribe("ticker", { id: "US88160R1014" }, (data) => {
+  console.log("Price update:", data);
+});
 
-// Step 2: Wait for user to receive OTP and enter it
-const otpCode = "1234"; // Get this from user input
-await client.completeLogin(otpCode);
-console.log("Login successful!");
-
-// Step 3: Make authenticated requests
-if (client.isAuthenticated()) {
-  const accountInfo = await client.getAccountInfo();
-  console.log("Account Info:", accountInfo);
-}
+// Some subscriptions auto-unsubscribe after sending all data
+ws.subscribe("instrument", { id: "US88160R1014" }, (data) => {
+  console.log("Instrument details:", data);
+  // This subscription will automatically close after receiving the data
+});
 ```
 
-## API Reference
+## API Overview
 
-### TradeRepublicClient
+### Authentication
 
-#### Methods
+- `initiateLogin(phoneNumber, pin)` - Start login process
+- `completeLogin(otpCode)` - Complete with SMS OTP
+- `loginWithCookies(cookies)` - Use existing session cookies
+- `isAuthenticated()` - Check auth status
+- `logout()` - Clear session
 
-##### `initiateLogin(phoneNumber: string, pin: string): Promise<void>`
+### REST API Methods
 
-Initiates the login process by sending phone number and PIN. An OTP will be sent to the registered device.
+- `getAccountInfo()` - Account details and balances
+- `getTrendingStocks()` - Popular stocks
+- `getPersonalDetails()` - Customer information
+- `getPaymentMethods()` - Payment options
+- `getTaxInformation()` - Tax details
+- `getAllDocuments()` - Account documents
 
-- `phoneNumber`: Your Trade Republic phone number (with country code, e.g., '+49151507xxxxx')
-- `pin`: Your 4-digit PIN
+### WebSocket Subscriptions
 
-##### `completeLogin(otpCode: string): Promise<void>`
+The WebSocket API allows real-time subscriptions to various data streams. Some subscriptions automatically unsubscribe after delivering the requested data, while others provide continuous updates.
 
-Completes the login process using the OTP received via SMS.
+```typescript
+// Portfolio and account data
+ws.subscribe("portfolio", {}, callback);
+ws.subscribe("cash", {}, callback);
 
-- `otpCode`: The 4-digit verification code received via SMS
+// Instrument data
+ws.subscribe("ticker", { id: "instrumentId" }, callback);
+ws.subscribe("instrument", { id: "instrumentId" }, callback);
 
-##### `getAccountInfo(): Promise<unknown>`
+// Market data
+ws.subscribe("neonSearch", { query: "Tesla" }, callback);
+```
 
-Retrieves account information. Requires successful authentication.
+**Important**: The WebSocket functionality is incomplete. Many subscription types and parameters are not yet implemented.
 
-Returns account details including balances, positions, etc.
+## Limitations
 
-##### `isAuthenticated(): boolean`
-
-Checks if the client is currently authenticated.
-
-Returns `true` if authenticated, `false` otherwise.
-
-##### `logout(): void`
-
-Clears the current session, requiring re-authentication for future requests.
+- **Incomplete**: Many API endpoints are missing
+- **WebSocket**: Limited subscription types implemented
+- **Unofficial**: Not supported by Trade Republic
+- **Rate Limits**: Be mindful of API usage
+- **Security**: Handle credentials and session data carefully
 
 ## Development
 
-### Running the Example
-
 ```bash
-git clone <repository-url>
+git clone https://github.com/nilsfischer/trade-republic-sdk.git
 cd trade-republic-sdk
 npm install
-npm run dev
-```
-
-### Building
-
-```bash
 npm run build
+npm test
 ```
-
-## Security Notes
-
-- Never hardcode credentials in your source code
-- Store sensitive information in environment variables
-- The SDK manages session cookies automatically - no need to handle them manually
-- Sessions may expire - implement proper error handling and re-authentication
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+This SDK is far from complete. Contributions are welcome.
 
 ## License
 
-MIT
+MIT - See [LICENSE](LICENSE) file.
 
 ## Disclaimer
 
-This SDK is not officially supported by Trade Republic. It's a community project for educational and development purposes. Use it responsibly and in accordance with Trade Republic's terms of service.
+This SDK is not officially supported by Trade Republic. Use responsibly and in accordance with Trade Republic's terms of service.
