@@ -271,3 +271,26 @@ export class TradeRepublicClient {
     this.sessionCookies = [];
   }
 }
+
+// Export types for users
+export type {
+  AccountInfo,
+  AllDocuments,
+  PaymentMethods,
+  PersonalDetails,
+  TaxExemptionOrders,
+  TaxInformation,
+  TaxResidency,
+  TrendingStocks,
+} from "./types";
+
+// Export WebSocket related exports
+export type {
+  CompactPortfolioByTypeRequest,
+  CompactPortfolioByTypeResponse,
+  NamedWatchlistRequest,
+  NamedWatchlistResponse,
+  PortfolioStatusResponse,
+  WatchlistsResponse,
+} from "./subscriptionTypes";
+export { TRWebSocket } from "./websocket";

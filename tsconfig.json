@@ -31,6 +31,13 @@
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false
   },
-  "include": ["index.ts", "types.ts", "utils.ts"],
-  "exclude": ["node_modules", "dist", "**/*.test.ts"]
+  "include": [
+    "index.ts",
+    "types.ts",
+    "utils.ts",
+    "websocket.ts",
+    "websocketFactory.ts",
+    "subscriptionTypes.ts"
+  ],
+  "exclude": ["node_modules", "dist", "**/*.test.ts", "tests/", "example.ts"]
 }

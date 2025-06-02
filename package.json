@@ -14,7 +14,8 @@
   },
   "files": [
     "dist/**/*",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc",
@@ -31,14 +32,21 @@
     "trading",
     "api",
     "sdk",
-    "finance"
+    "finance",
+    "typescript",
+    "javascript",
+    "websocket"
   ],
-  "author": "Your Name",
+  "author": "Nils Fischer",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/yourusername/tr-sdk.git"
+    "url": "git+https://github.com/nilsfischer/trade-republic-sdk.git"
   },
+  "bugs": {
+    "url": "https://github.com/nilsfischer/trade-republic-sdk/issues"
+  },
+  "homepage": "https://github.com/nilsfischer/trade-republic-sdk#readme",
   "devDependencies": {
     "@inquirer/prompts": "^7.5.2",
     "@types/bun": "latest",
