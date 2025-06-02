@@ -22,7 +22,8 @@
     "format": "prettier --write .",
     "prepublishOnly": "npm run build",
     "test": "bun test tests/",
-    "test:setup": "bun run tests/test-runner.ts",
+    "test:client": "bun test tests/client.test.ts",
+    "test:ws": "bun test tests/websocket.test.ts",
     "test:watch": "bun test tests/ --watch"
   },
   "keywords": [
