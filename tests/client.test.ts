@@ -1,6 +1,4 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "fs";
-import { join } from "path";
 import { TradeRepublicClient } from "../index";
 import {
   AccountInfoSchema,
@@ -12,39 +10,13 @@ import {
   TaxResidencySchema,
   TrendingStocksSchema,
 } from "../types";
-
-const COOKIES_FILE = join(process.cwd(), "test-cookies.json");
-
-function loadTestCookies(): string[] | null {
-  try {
-    if (!existsSync(COOKIES_FILE)) {
-      return null;
-    }
-
-    const cookiesData = readFileSync(COOKIES_FILE, "utf-8");
-    const cookies = JSON.parse(cookiesData);
-
-    if (!Array.isArray(cookies) || cookies.length === 0) {
-      return null;
-    }
-
-    return cookies;
-  } catch (error) {
-    return null;
-  }
-}
+import { ensureAuthenticationForTests } from "./auth-setup";
 
 describe("TradeRepublicClient", () => {
   let client: TradeRepublicClient;
 
   beforeAll(async () => {
-    // Load test cookies that should be set up by running: bun run test:setup
-    const cookies = loadTestCookies();
-    if (!cookies) {
-      throw new Error(
-        'No test cookies found. Please run "bun run test:setup" first to authenticate.',
-      );
-    }
+    const cookies = await ensureAuthenticationForTests();
 
     client = new TradeRepublicClient();
     await client.loginWithCookies(cookies);
