@@ -51,6 +51,7 @@
     "@inquirer/prompts": "^7.5.2",
     "@types/bun": "latest",
     "@types/ws": "^8.18.1",
+    "bun-types": "^1.2.16",
     "prettier": "^3.5.3",
     "prettier-plugin-organize-imports": "^4.1.0",
     "typescript": "^5"
@@ -69,5 +70,6 @@
   },
   "engines": {
     "node": ">=18"
-  }
+  },
+  "private": true
 }
