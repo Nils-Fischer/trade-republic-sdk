@@ -77,14 +77,62 @@ async function signPayload(
 }
 
 export function extractCookiesFromResponse(response: Response): string[] {
-  const setCookieHeaders = response.headers.getSetCookie?.() || [];
-  return setCookieHeaders
-    .map((cookie) => {
-      // Extract just the name=value part (before the first semicolon)
+  // Handle environments with or without `headers.getSetCookie()` (React Native lacks it).
+  let rawCookies: string[] = [];
+
+  // Bun / Node >= 20 provide `getSetCookie()` which returns an array of header strings.
+  if (typeof response.headers.getSetCookie === "function") {
+    rawCookies = response.headers.getSetCookie() || [];
+  }
+
+  // Fallback for React-Native fetch: use the standard `set-cookie` header.
+  if (rawCookies.length === 0 && typeof response.headers.get === "function") {
+    const sc = response.headers.get("set-cookie") || response.headers.get("Set-Cookie");
+    if (sc) {
+      if (Array.isArray(sc)) {
+        rawCookies = sc;
+      } else {
+        // More sophisticated parsing for comma-separated cookies
+        rawCookies = [];
+        let current = "";
+        let inQuotes = false;
+
+        for (let i = 0; i < sc.length; i++) {
+          const char = sc[i];
+
+          if (char === '"') {
+            inQuotes = !inQuotes;
+          }
+
+          if (char === "," && !inQuotes) {
+            const nextPart = sc.slice(i + 1).trim();
+            // A new cookie should start with `key=` and not be part of a date string
+            if (
+              /^\s*[^=;\s]+\s*=/.test(nextPart) &&
+              !/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)/i.test(nextPart)
+            ) {
+              rawCookies.push(current.trim());
+              current = "";
+              continue;
+            }
+          }
+
+          current += char;
+        }
+
+        if (current.trim()) {
+          rawCookies.push(current.trim());
+        }
+      }
+    }
+  }
+
+  return rawCookies
+    .map((cookie: string) => {
       const cookieValue = cookie.split(";")[0];
       return cookieValue || null;
     })
-    .filter((cookie): cookie is string => cookie !== null);
+    .filter((cookie: string | null) => cookie !== null);
 }
 
 // Make a signed request to TR API

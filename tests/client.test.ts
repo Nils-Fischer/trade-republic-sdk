@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { TradeRepublicClient } from "../index";
 import {
   AccountInfoSchema,
@@ -199,6 +199,58 @@ describe("TradeRepublicClient", () => {
       // Language is private, but we can test that different instances can be created
       expect(germanClient).toBeInstanceOf(TradeRepublicClient);
       expect(englishClient).toBeInstanceOf(TradeRepublicClient);
+    });
+  });
+
+  describe("Cookie Fallback Integration", () => {
+    test("should correctly parse cookies during login on platforms without getSetCookie", async () => {
+      const fallbackClient = new TradeRepublicClient();
+
+      const rawCookieHeader =
+        "tr_session=a-fallback-session-id; path=/; secure, __cf_bm=a-fallback-cookie; expires=Thu, 26-Oct-2024 10:00:00 GMT";
+
+      const mockResponse = {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          processId: "12345",
+          countdownInSeconds: 180,
+          "2fa": "sms",
+        }),
+        text: async () =>
+          JSON.stringify({
+            processId: "12345",
+            countdownInSeconds: 180,
+            "2fa": "sms",
+          }),
+        headers: {
+          get: (header: string) => {
+            if (header.toLowerCase() === "set-cookie") {
+              return rawCookieHeader;
+            }
+            return null;
+          },
+          // No getSetCookie present on this mocked response
+        },
+      } as unknown as Response;
+
+      // Mock global.fetch for just this test
+      const originalFetch = global.fetch;
+      global.fetch = mock(async () => mockResponse) as any;
+
+      // This will call makeSignedRequest and then extractCookiesFromResponse internally
+      await fallbackClient.initiateLogin("+123456789", "1234");
+
+      // Verify that the client's internal state was set correctly by the fallback logic
+      const internalCookies = (fallbackClient as any).initialCookies;
+      expect(internalCookies).toEqual([
+        "tr_session=a-fallback-session-id",
+        "__cf_bm=a-fallback-cookie",
+      ]);
+
+      // Restore global.fetch
+      global.fetch = originalFetch;
     });
   });
 });
