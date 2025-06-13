@@ -1,6 +1,6 @@
 {
   "name": "trade-republic-sdk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Unofficial SDK for Trade Republic API",
   "main": "dist/index.js",
   "module": "dist/index.js",
@@ -21,7 +21,7 @@
     "build": "tsc",
     "dev": "bun run example.ts",
     "format": "prettier --write .",
-    "prepublishOnly": "npm run build",
+    "prepublishOnly": "bun run build",
     "test": "bun test tests/",
     "test:client": "bun test tests/client.test.ts",
     "test:ws": "bun test tests/websocket.test.ts",
@@ -70,6 +70,5 @@
   },
   "engines": {
     "node": ">=18"
-  },
-  "private": true
+  }
 }
