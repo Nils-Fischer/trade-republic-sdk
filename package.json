@@ -1,6 +1,6 @@
 {
   "name": "trade-republic-sdk",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Unofficial SDK for Trade Republic API",
   "main": "dist/index.js",
   "module": "dist/index.js",
