@@ -5,6 +5,13 @@ export default defineConfig({
     "*": "vp check --fix",
   },
   pack: {
+    entry: {
+      index: "src/index.ts",
+      react: "src/react.ts",
+      testing: "src/testing.ts",
+    },
+    platform: "neutral",
+    target: "es2022",
     dts: {
       tsgo: true,
     },

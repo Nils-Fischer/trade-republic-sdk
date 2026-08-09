@@ -1,23 +1,46 @@
-# vite-plus-starter
+# Trade Republic SDK
 
-A starter for creating a Vite Plus project.
+An unofficial TypeScript SDK for Trade Republic's private API.
+
+> This project is not affiliated with Trade Republic. Its private API can change without notice.
+
+The package is under active development. It targets Node.js 22.4 and newer, Bun, browsers, and
+React Native. React bindings are isolated in the optional `trade-republic-sdk/react` entry point.
+
+## Install
+
+```bash
+npm install trade-republic-sdk
+```
+
+## Errors
+
+Every SDK failure inherits from `TRError`. Consumers can catch that root type or distinguish
+authentication, HTTP, Topic, validation, timeout, connection, and abort failures by class.
+
+```ts
+import { TRError, TRTopicError } from "trade-republic-sdk";
+
+try {
+  // Call the SDK.
+} catch (error) {
+  if (error instanceof TRTopicError) {
+    console.log(error.errorCode);
+  } else if (error instanceof TRError) {
+    console.log(error.message);
+  }
+}
+```
 
 ## Development
 
-- Install dependencies:
-
 ```bash
 vp install
-```
-
-- Run the unit tests:
-
-```bash
+vp check
 vp test
+vp run build
 ```
 
-- Build the library:
+## License
 
-```bash
-vp pack
-```
+[MIT](./LICENSE)
