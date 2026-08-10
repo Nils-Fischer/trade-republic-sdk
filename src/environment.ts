@@ -1,6 +1,6 @@
 import { TRConnectionError } from "./errors.ts";
 
-export type TimerHandle = unknown;
+export type TimerHandle = number | ReturnType<typeof globalThis.setTimeout>;
 
 /** Time and timer operations used by the SDK. */
 export interface Clock {
@@ -14,10 +14,26 @@ export interface Clock {
 /** The WebSocket surface used by the transport. */
 export interface Socket {
   readonly readyState: number;
-  addEventListener(type: string, listener: (event: unknown) => void): void;
-  removeEventListener(type: string, listener: (event: unknown) => void): void;
-  send(data: string | ArrayBuffer | ArrayBufferView): void;
+  onopen: (() => void) | null;
+  onmessage: ((event: SocketMessageEvent) => void) | null;
+  onerror: ((event: SocketErrorEvent) => void) | null;
+  onclose: ((event: SocketCloseEvent) => void) | null;
+  send(data: string): void;
   close(code?: number, reason?: string): void;
+}
+
+export interface SocketMessageEvent {
+  readonly data: string;
+}
+
+export interface SocketCloseEvent {
+  readonly code: number;
+  readonly reason: string;
+  readonly wasClean: boolean;
+}
+
+export interface SocketErrorEvent {
+  readonly error?: unknown;
 }
 
 /** Creates a socket using the runtime's standard WebSocket implementation. */
@@ -41,9 +57,9 @@ export interface ResolvedEnvironment {
 const realClock: Clock = {
   now: () => Date.now(),
   setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
-  clearTimeout: (handle) => globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>),
+  clearTimeout: (handle) => globalThis.clearTimeout(handle),
   setInterval: (callback, intervalMs) => globalThis.setInterval(callback, intervalMs),
-  clearInterval: (handle) => globalThis.clearInterval(handle as ReturnType<typeof setInterval>),
+  clearInterval: (handle) => globalThis.clearInterval(handle),
 };
 
 const realSocket: SocketFactory = (url, protocols) => {

@@ -1,5 +1,12 @@
-import type { Clock, TimerHandle } from "./environment.ts";
-import { TRValidationError } from "./errors.ts";
+import type {
+  Clock,
+  Socket,
+  SocketCloseEvent,
+  SocketErrorEvent,
+  SocketMessageEvent,
+  TimerHandle,
+} from "./environment.ts";
+import { TRConnectionError, TRValidationError } from "./errors.ts";
 
 interface ScheduledTimer {
   callback: () => void;
@@ -26,7 +33,7 @@ export class FakeClock implements Clock {
   }
 
   clearTimeout(handle: TimerHandle): void {
-    this.#timers.delete(handle as number);
+    if (typeof handle === "number") this.#timers.delete(handle);
   }
 
   setInterval(callback: () => void, intervalMs: number): TimerHandle {
@@ -34,7 +41,7 @@ export class FakeClock implements Clock {
   }
 
   clearInterval(handle: TimerHandle): void {
-    this.#timers.delete(handle as number);
+    if (typeof handle === "number") this.#timers.delete(handle);
   }
 
   advanceBy(durationMs: number): void {
@@ -98,5 +105,79 @@ export class FakeClock implements Clock {
     }
 
     return next;
+  }
+}
+
+/** A controllable WebSocket for tests that drive the SDK through its environment seam. */
+export class FakeSocket implements Socket {
+  readonly CONNECTING = 0;
+  readonly OPEN = 1;
+  readonly CLOSING = 2;
+  readonly CLOSED = 3;
+  readonly sent: string[] = [];
+  readonly #clock?: Clock;
+  onopen: (() => void) | null = null;
+  onmessage: ((event: SocketMessageEvent) => void) | null = null;
+  onerror: ((event: SocketErrorEvent) => void) | null = null;
+  onclose: ((event: SocketCloseEvent) => void) | null = null;
+  readyState = this.CONNECTING;
+
+  constructor(clock?: Clock) {
+    this.#clock = clock;
+  }
+
+  send(data: string): void {
+    if (this.readyState !== this.OPEN) {
+      throw new TRConnectionError("The fake socket is not open");
+    }
+    this.sent.push(data);
+  }
+
+  close(code = 1_000, reason = ""): void {
+    this.#close(code, reason, true);
+  }
+
+  /** Report that the transport is open. The server handshake remains separate. */
+  open(): void {
+    if (this.readyState !== this.CONNECTING) {
+      throw new TRValidationError("Only a connecting fake socket can open");
+    }
+    this.readyState = this.OPEN;
+    this.onopen?.();
+  }
+
+  /** Deliver any server line now, or after fake-clock time advances. */
+  receive(data: string, delayMs = 0): void {
+    if (delayMs < 0) throw new TRValidationError("delayMs must not be negative");
+    if (delayMs === 0) {
+      this.#deliver(data);
+      return;
+    }
+    if (!this.#clock) {
+      throw new TRValidationError("A delayed reply requires a FakeSocket clock");
+    }
+    this.#clock.setTimeout(() => this.#deliver(data), delayMs);
+  }
+
+  /** Drop the transport as if the network disappeared. */
+  drop(code = 1_006, reason = "Connection lost"): void {
+    this.#close(code, reason, false);
+  }
+
+  fail(cause: unknown = new Error("Fake socket failure")): void {
+    this.onerror?.({ error: cause });
+  }
+
+  #deliver(data: string): void {
+    if (this.readyState !== this.OPEN) {
+      throw new TRConnectionError("The fake socket is not open");
+    }
+    this.onmessage?.({ data });
+  }
+
+  #close(code: number, reason: string, wasClean: boolean): void {
+    if (this.readyState === this.CLOSED) return;
+    this.readyState = this.CLOSED;
+    this.onclose?.({ code, reason, wasClean });
   }
 }

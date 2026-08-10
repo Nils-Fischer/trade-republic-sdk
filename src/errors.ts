@@ -49,5 +49,9 @@ export class TRTimeoutError extends TRError {
 /** A connection could not be opened or was lost. */
 export class TRConnectionError extends TRError {}
 
+export function toConnectionError(message: string, cause: unknown): TRConnectionError {
+  return cause instanceof TRConnectionError ? cause : new TRConnectionError(message, { cause });
+}
+
 /** The caller cancelled an operation. */
 export class TRAbortError extends TRError {}
