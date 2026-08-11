@@ -12,23 +12,33 @@ import {
   TRTopicError,
   TRValidationError,
 } from "./errors.ts";
-import { createSession, type LoginOptions, type Session, type SessionValidity } from "./session.ts";
+import {
+  decodeResourceResponse,
+  resourceNames,
+  resourceRegistry,
+  type ResourceName,
+  type ResourceResponse,
+} from "./resources.ts";
+import {
+  createSession,
+  type GetOptions as SessionGetOptions,
+  type LoginOptions,
+  type Session,
+  type SessionValidity,
+} from "./session.ts";
 import {
   decodeTopicResponse,
   encodeTopicRequest,
   isSecuredTopic,
   topicNames,
-  type ResponseValidation,
   type TopicName,
   type TopicRequest,
   type TopicResponse,
-  type ValidationMode,
+  type TimelineTransaction,
 } from "./topics.ts";
+import type { ResponseValidation, ValidationMode } from "./validation.ts";
 
-export interface GetOptions {
-  signal?: AbortSignal;
-  timeoutMs?: number;
-}
+export type GetOptions = SessionGetOptions;
 
 export interface TRClientOptions extends Environment {
   validate?: ValidationMode;
@@ -41,9 +51,32 @@ export interface TopicAccessor<Name extends TopicName> {
   watch(request: TopicRequest<Name>): AsyncIterable<TopicResponse<Name>>;
 }
 
+export interface ResourceAccessor<Response> {
+  get(options?: GetOptions): Promise<Response>;
+}
+
+export interface GetTimelineTransactionsOptions {
+  from: Date;
+  to?: Date;
+  signal?: AbortSignal;
+  pageTimeoutMs?: number;
+  maxPages?: number;
+}
+
 type NamedTopicAccessors = {
   readonly [Name in TopicName]: TopicAccessor<Name>;
 };
+
+type NamedResourceAccessors = {
+  readonly [Name in ResourceName]: ResourceAccessor<ResourceResponse<Name>>;
+};
+
+const DEFAULT_TIMELINE_PAGE_TIMEOUT_MS = 15_000;
+
+const duplicateAccessorName = resourceNames.find((name) => topicNames.includes(name as TopicName));
+if (duplicateAccessorName) {
+  throw new Error(`Duplicate TRClient accessor name "${duplicateAccessorName}"`);
+}
 
 /** The complete client for Trade Republic Topics and HTTP resources. */
 // oxlint-disable-next-line typescript/no-unsafe-declaration-merging -- The Registry installs the merged accessors in the constructor.
@@ -66,6 +99,14 @@ export class TRClient {
       Object.defineProperty(this, name, {
         enumerable: true,
         value: this.topic(name),
+      });
+    });
+    resourceNames.forEach((name) => {
+      Object.defineProperty(this, name, {
+        enumerable: true,
+        value: {
+          get: (options?: GetOptions) => this.#getResource(name, options),
+        },
       });
     });
   }
@@ -116,6 +157,88 @@ export class TRClient {
       get: (request, options) => this.#get(name, request, options),
       watch: (request) => this.#watch(name, request),
     };
+  }
+
+  /** Read and combine bounded raw timeline pages, newest first. */
+  async getTimelineTransactions(
+    options: GetTimelineTransactionsOptions,
+  ): Promise<TimelineTransaction[]> {
+    const from = validDateTimestamp(options.from, "from");
+    const to = validDateTimestamp(options.to ?? new Date(), "to");
+    if (from >= to) throw new TRValidationError("from must be before to");
+
+    const maxPages = options.maxPages ?? 1_000;
+    if (!Number.isInteger(maxPages) || maxPages <= 0) {
+      throw new TRValidationError("maxPages must be a positive integer");
+    }
+    if (options.signal?.aborted) {
+      throw new TRAbortError("Timeline pagination was aborted", {
+        cause: options.signal.reason,
+      });
+    }
+
+    const transactions = new Map<string, TimelineTransaction>();
+    const cursors = new Set<string>();
+    let after: string | undefined;
+    let previousPageOldest = Number.POSITIVE_INFINITY;
+
+    for (let pageNumber = 1; pageNumber <= maxPages; pageNumber += 1) {
+      const page = await this.timelineTransactions.get(after ? { after } : {}, {
+        signal: options.signal,
+        timeoutMs: options.pageTimeoutMs ?? DEFAULT_TIMELINE_PAGE_TIMEOUT_MS,
+      });
+      let previousTimestamp = Number.POSITIVE_INFINITY;
+      let pageNewest: number | undefined;
+      let pageOldest: number | undefined;
+      let crossedFrom = false;
+
+      for (const transaction of page.items) {
+        const timestamp = Date.parse(transaction.timestamp);
+        if (!Number.isFinite(timestamp)) {
+          throw new TRValidationError(
+            `Timeline transaction "${transaction.id}" has an invalid timestamp`,
+          );
+        }
+        if (timestamp > previousTimestamp) {
+          throw new TRValidationError("Timeline page is not ordered newest-first");
+        }
+        previousTimestamp = timestamp;
+        pageNewest ??= timestamp;
+        pageOldest = timestamp;
+
+        if (timestamp < from) crossedFrom = true;
+        if (timestamp >= from && timestamp < to && !transactions.has(transaction.id)) {
+          transactions.set(transaction.id, transaction);
+        }
+      }
+
+      if (pageNewest !== undefined && pageNewest > previousPageOldest) {
+        throw new TRValidationError("Timeline pages overlap out of order");
+      }
+      if (pageOldest !== undefined) previousPageOldest = pageOldest;
+      if (crossedFrom) return newestFirst(transactions);
+
+      const next = page.cursors.after;
+      if (!next) return newestFirst(transactions);
+      if (cursors.has(next)) {
+        throw new TRValidationError(`Timeline pagination returned repeated cursor "${next}"`);
+      }
+      cursors.add(next);
+      if (pageNumber === maxPages) {
+        throw new TRValidationError(`Timeline pagination reached maxPages (${maxPages})`);
+      }
+      after = next;
+    }
+
+    throw new TRValidationError("Timeline pagination ended unexpectedly");
+  }
+
+  async #getResource<Name extends ResourceName>(
+    name: Name,
+    options: GetOptions = {},
+  ): Promise<ResourceResponse<Name>> {
+    const response = await this.#session.get(resourceRegistry[name].path, options);
+    return decodeResourceResponse(name, response, this.#responseValidation);
   }
 
   #get<Name extends TopicName>(
@@ -286,4 +409,19 @@ export class TRClient {
   }
 }
 
-export interface TRClient extends NamedTopicAccessors {}
+function validDateTimestamp(date: Date, optionName: string): number {
+  if (!(date instanceof Date) || !Number.isFinite(date.getTime())) {
+    throw new TRValidationError(`${optionName} must be a valid Date`);
+  }
+  return date.getTime();
+}
+
+function newestFirst(
+  transactions: ReadonlyMap<string, TimelineTransaction>,
+): TimelineTransaction[] {
+  return [...transactions.values()].sort(
+    (left, right) => Date.parse(right.timestamp) - Date.parse(left.timestamp),
+  );
+}
+
+export interface TRClient extends NamedTopicAccessors, NamedResourceAccessors {}

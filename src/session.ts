@@ -39,6 +39,11 @@ export interface LoginOptions {
   pollIntervalMs?: number;
 }
 
+export interface GetOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
 export interface Session {
   readonly validity: SessionValidity;
   readonly cookieHeader: string | undefined;
@@ -46,6 +51,7 @@ export interface Session {
   refresh(): Promise<void>;
   markRejected(cause?: unknown): TRAuthError;
   recover(cause?: unknown): Promise<void>;
+  get(path: string, options?: GetOptions): Promise<Response>;
   export(): string | undefined;
   logout(): void;
 }
@@ -58,6 +64,7 @@ interface RequestOptions {
   signal?: AbortSignal;
   rejectSession?: boolean;
   sessionRevision?: number;
+  cancellation?: () => TRAbortError | TRTimeoutError;
 }
 
 function cookieName(cookie: string): string {
@@ -229,7 +236,7 @@ export function createSession(environment: ResolvedEnvironment, serialized?: str
       });
     } catch (cause) {
       if (options.signal?.aborted) {
-        throw loginCancellation(options.signal);
+        throw options.cancellation?.() ?? loginCancellation(options.signal);
       }
       throw new TRHttpError(0, "Could not reach Trade Republic", { cause });
     }
@@ -321,6 +328,84 @@ export function createSession(environment: ResolvedEnvironment, serialized?: str
   const recover = async (cause?: unknown): Promise<void> => {
     markRejected(cause);
     await refresh();
+  };
+
+  const get = (path: string, options: GetOptions = {}): Promise<Response> => {
+    if (validity !== "presumed-valid") {
+      return Promise.reject(new TRAuthError(`Resource "${path}" requires a Session`));
+    }
+    if (options.signal?.aborted) {
+      return Promise.reject(
+        new TRAbortError(`Get for Resource "${path}" was aborted`, {
+          cause: options.signal.reason,
+        }),
+      );
+    }
+
+    const controller = environment.createAbortController();
+    const abort = (): void => controller.abort(options.signal?.reason);
+    const timeoutError = new TRTimeoutError(
+      `Get for Resource "${path}" timed out after ${options.timeoutMs} ms`,
+      options.timeoutMs,
+    );
+    const cancellation = (): TRAbortError | TRTimeoutError =>
+      controller.signal.reason instanceof TRTimeoutError
+        ? controller.signal.reason
+        : new TRAbortError(`Get for Resource "${path}" was aborted`, {
+            cause: controller.signal.reason,
+          });
+    const timeout =
+      options.timeoutMs === undefined
+        ? undefined
+        : environment.clock.setTimeout(() => controller.abort(timeoutError), options.timeoutMs);
+    options.signal?.addEventListener("abort", abort, { once: true });
+
+    const perform = async (): Promise<Response> => {
+      const read = (): Promise<Response> =>
+        request({
+          method: "GET",
+          path,
+          cookies,
+          signal: controller.signal,
+          cancellation,
+        });
+
+      try {
+        return await read();
+      } catch (error) {
+        if (!(error instanceof TRHttpError) || (error.status !== 401 && error.status !== 403)) {
+          throw error;
+        }
+        const recovery = recover(error);
+        const interrupted = new Promise<never>((_resolve, reject) => {
+          const interrupt = (): void => reject(cancellation());
+          if (controller.signal.aborted) {
+            interrupt();
+            return;
+          }
+          controller.signal.addEventListener("abort", interrupt, { once: true });
+          const removeInterrupt = (): void =>
+            controller.signal.removeEventListener("abort", interrupt);
+          void recovery.then(removeInterrupt, removeInterrupt);
+        });
+        await Promise.race([recovery, interrupted]);
+        if (controller.signal.aborted) throw cancellation();
+        return request({
+          method: "GET",
+          path,
+          cookies,
+          signal: controller.signal,
+          rejectSession: true,
+          sessionRevision: revision,
+          cancellation,
+        });
+      }
+    };
+
+    return perform().finally(() => {
+      if (timeout !== undefined) environment.clock.clearTimeout(timeout);
+      options.signal?.removeEventListener("abort", abort);
+    });
   };
 
   const performLogin = async (
@@ -458,6 +543,7 @@ export function createSession(environment: ResolvedEnvironment, serialized?: str
     refresh,
     markRejected,
     recover,
+    get,
     export: () =>
       cookies.length > 0
         ? JSON.stringify({
