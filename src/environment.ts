@@ -1,4 +1,5 @@
 import { TRConnectionError } from "./errors.ts";
+import { encodeBase64 } from "./encoding.ts";
 
 export type TimerHandle = number | ReturnType<typeof globalThis.setTimeout>;
 
@@ -36,8 +37,16 @@ export interface SocketErrorEvent {
   readonly error?: unknown;
 }
 
+export interface SocketOptions {
+  readonly headers?: Readonly<Record<string, string>>;
+}
+
 /** Creates a socket using the runtime's standard WebSocket implementation. */
-export type SocketFactory = (url: string, protocols?: string | string[]) => Socket;
+export type SocketFactory = (
+  url: string,
+  protocols?: string | string[],
+  options?: SocketOptions,
+) => Socket;
 
 export type Fetch = typeof globalThis.fetch;
 
@@ -52,6 +61,9 @@ export interface ResolvedEnvironment {
   fetch: Fetch;
   socket: SocketFactory;
   clock: Clock;
+  createAbortController(): AbortController;
+  parseDate(value: string): number;
+  deviceInfo: string;
 }
 
 const realClock: Clock = {
@@ -62,7 +74,60 @@ const realClock: Clock = {
   clearInterval: (handle) => globalThis.clearInterval(handle),
 };
 
-const realSocket: SocketFactory = (url, protocols) => {
+const stableDeviceId =
+  globalThis.crypto?.randomUUID?.().replaceAll("-", "") ??
+  Math.random().toString(16).slice(2).padEnd(32, "0").slice(0, 32);
+
+function createDeviceInfo(): string {
+  const runtimeNavigator = globalThis.navigator as
+    | (Navigator & { deviceMemory?: number })
+    | undefined;
+  const runtimeScreen = (
+    globalThis as typeof globalThis & {
+      screen?: { width: number; height: number; colorDepth: number };
+    }
+  ).screen;
+
+  return encodeBase64(
+    JSON.stringify({
+      stableDeviceId,
+      model: "Apple Macintosh",
+      browser: "Chrome",
+      browserVersion: "150.0.0.0",
+      os: "Mac OS",
+      osVersion: "10.15.7",
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      timezoneOffset: new Date().getTimezoneOffset(),
+      screen: runtimeScreen
+        ? `${runtimeScreen.width}x${runtimeScreen.height}x${runtimeScreen.colorDepth}`
+        : "1470x956x30",
+      preferredLanguages: runtimeNavigator?.languages ?? ["en-US"],
+      numberOfCores: runtimeNavigator?.hardwareConcurrency ?? 4,
+      deviceMemory: runtimeNavigator?.deviceMemory ?? 16,
+    }),
+  );
+}
+
+interface ReactNativeSocketConstructor {
+  new (url: string, protocols?: string | string[], options?: SocketOptions): Socket;
+}
+
+interface NodeSocketConstructor {
+  new (url: string, options: SocketOptions & { protocols?: string | string[] }): Socket;
+}
+
+function isReactNative(): boolean {
+  return (
+    typeof navigator !== "undefined" &&
+    (navigator as Navigator & { product?: string }).product === "ReactNative"
+  );
+}
+
+function isNode(): boolean {
+  return typeof process !== "undefined" && process.versions?.node !== undefined;
+}
+
+const realSocket: SocketFactory = (url, protocols, options) => {
   const NativeSocket = globalThis.WebSocket;
   if (!NativeSocket) {
     throw new TRConnectionError(
@@ -70,6 +135,15 @@ const realSocket: SocketFactory = (url, protocols) => {
     );
   }
 
+  if (isReactNative()) {
+    return new (NativeSocket as unknown as ReactNativeSocketConstructor)(url, protocols, options);
+  }
+  if (isNode() && options) {
+    return new (NativeSocket as unknown as NodeSocketConstructor)(url, {
+      ...options,
+      ...(protocols === undefined ? {} : { protocols }),
+    });
+  }
   return new NativeSocket(url, protocols) as Socket;
 };
 
@@ -79,5 +153,8 @@ export function resolveEnvironment(environment: Environment = {}): ResolvedEnvir
     fetch: environment.fetch ?? globalThis.fetch,
     socket: environment.socket ?? realSocket,
     clock: environment.clock ?? realClock,
+    createAbortController: () => new AbortController(),
+    parseDate: (value) => Date.parse(value),
+    deviceInfo: createDeviceInfo(),
   };
 }

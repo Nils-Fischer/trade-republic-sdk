@@ -5,10 +5,18 @@ import {
   type ResolvedEnvironment,
   type TimerHandle,
 } from "./environment.ts";
-import { TRAbortError, TRTimeoutError, TRValidationError } from "./errors.ts";
+import {
+  TRAbortError,
+  TRAuthError,
+  TRTimeoutError,
+  TRTopicError,
+  TRValidationError,
+} from "./errors.ts";
+import { createSession, type LoginOptions, type Session, type SessionValidity } from "./session.ts";
 import {
   decodeTopicResponse,
   encodeTopicRequest,
+  isSecuredTopic,
   topicNames,
   type ResponseValidation,
   type TopicName,
@@ -25,6 +33,7 @@ export interface GetOptions {
 export interface TRClientOptions extends Environment {
   validate?: ValidationMode;
   onValidationWarning?: (warning: TRValidationError) => void;
+  session?: string;
 }
 
 export interface TopicAccessor<Name extends TopicName> {
@@ -40,12 +49,15 @@ type NamedTopicAccessors = {
 // oxlint-disable-next-line typescript/no-unsafe-declaration-merging -- The Registry installs the merged accessors in the constructor.
 export class TRClient {
   readonly #environment: ResolvedEnvironment;
+  readonly #session: Session;
   readonly #connection: Connection;
   readonly #responseValidation: ResponseValidation;
+  #connectionUpdate: Promise<void> | undefined;
 
   constructor(options: TRClientOptions = {}) {
     this.#environment = resolveEnvironment(options);
-    this.#connection = createConnection(this.#environment);
+    this.#session = createSession(this.#environment, options.session);
+    this.#connection = createConnection(this.#environment, () => this.#session.cookieHeader);
     this.#responseValidation = {
       mode: options.validate ?? "warn",
       warn: options.onValidationWarning ?? ((warning) => console.warn(warning)),
@@ -63,6 +75,41 @@ export class TRClient {
     return this.#connection.isAlive;
   }
 
+  /** Whether this client has a Session that Trade Republic has not rejected. */
+  get sessionValidity(): SessionValidity {
+    return this.#session.validity;
+  }
+
+  /** Establish a Session and wait for approval in the Trade Republic app. */
+  async login(phoneNumber: string, pin: string, options?: LoginOptions): Promise<void> {
+    await this.#session.login(phoneNumber, pin, options);
+    const update = this.#connection.reconnectAfterLogin();
+    if (!update) return;
+    this.#connectionUpdate = update;
+    void update
+      .finally(() => {
+        if (this.#connectionUpdate === update) this.#connectionUpdate = undefined;
+      })
+      .catch(() => undefined);
+  }
+
+  /** Refresh the current Session. Concurrent callers share the same request. */
+  refresh(): Promise<void> {
+    return this.#session.refresh();
+  }
+
+  /** Return the current Session as an opaque serializable string. */
+  exportSession(): string | undefined {
+    return this.#session.export();
+  }
+
+  /** Clear the Session and close the connection. */
+  logout(): void {
+    this.#session.logout();
+    this.#connection.disconnect();
+    this.#connectionUpdate = undefined;
+  }
+
   /** Address a Topic whose name is chosen at runtime. */
   topic<Name extends TopicName>(name: Name): TopicAccessor<Name> {
     return {
@@ -76,6 +123,9 @@ export class TRClient {
     request: TopicRequest<Name>,
     options: GetOptions = {},
   ): Promise<TopicResponse<Name>> {
+    if (isSecuredTopic(name) && this.#session.validity !== "presumed-valid") {
+      return Promise.reject(new TRAuthError(`Topic "${name}" requires a Session`));
+    }
     const payload = encodeTopicRequest(name, request);
 
     return new Promise<TopicResponse<Name>>((resolve, reject) => {
@@ -83,6 +133,7 @@ export class TRClient {
       let timeoutHandle: TimerHandle;
       let hasTimeout = false;
       let finished = false;
+      let recovered = false;
 
       const cleanUp = (): void => {
         if (hasTimeout) this.#environment.clock.clearTimeout(timeoutHandle);
@@ -95,7 +146,18 @@ export class TRClient {
         subscription?.unsubscribe();
         action();
       };
-      const fail = (error: Error): void => finish(() => reject(error));
+      const fail = (error: Error): void => {
+        if (this.#isAuthenticationError(error)) {
+          if (recovered) {
+            finish(() => reject(this.#session.markRejected(error)));
+            return;
+          }
+          recovered = true;
+          void this.#recoverConnection(error).then(subscribe).catch(fail);
+          return;
+        }
+        finish(() => reject(error));
+      };
       const abort = (): void => {
         fail(
           new TRAbortError(`Get for Topic "${name}" was aborted`, {
@@ -122,20 +184,19 @@ export class TRClient {
         }, options.timeoutMs);
       }
 
-      void this.#connection
-        .connect()
-        .then(() => {
-          if (finished) return;
-          subscription = this.#connection.subscribe(
-            payload,
-            (rawPayload) => decodeTopicResponse(name, rawPayload, this.#responseValidation),
-            {
-              next: (value) => finish(() => resolve(value)),
-              error: fail,
-            },
-          );
-        })
-        .catch(fail);
+      const subscribe = (): void => {
+        if (finished) return;
+        subscription = this.#connection.subscribe(
+          payload,
+          (rawPayload) => decodeTopicResponse(name, rawPayload, this.#responseValidation),
+          {
+            next: (value) => finish(() => resolve(value)),
+            error: fail,
+          },
+        );
+      };
+
+      void this.#connect().then(subscribe).catch(fail);
     });
   }
 
@@ -143,12 +204,34 @@ export class TRClient {
     name: Name,
     request: TopicRequest<Name>,
   ): AsyncIterableIterator<TopicResponse<Name>> {
+    if (isSecuredTopic(name) && this.#session.validity !== "presumed-valid") {
+      throw new TRAuthError(`Topic "${name}" requires a Session`);
+    }
     const payload = encodeTopicRequest(name, request);
+    let recovered = false;
+
+    for (;;) {
+      try {
+        yield* this.#watchSubscription(name, payload);
+        return;
+      } catch (error) {
+        if (!(error instanceof Error) || !this.#isAuthenticationError(error)) throw error;
+        if (recovered) throw this.#session.markRejected(error);
+        recovered = true;
+        await this.#recoverConnection(error);
+      }
+    }
+  }
+
+  async *#watchSubscription<Name extends TopicName>(
+    name: Name,
+    payload: object,
+  ): AsyncIterableIterator<TopicResponse<Name>> {
     let latest: TopicResponse<Name> | undefined;
     let failure: Error | undefined;
     let wake: (() => void) | undefined;
 
-    await this.#connection.connect();
+    await this.#connect();
     const subscription = this.#connection.subscribe(
       payload,
       (rawPayload) => decodeTopicResponse(name, rawPayload, this.#responseValidation),
@@ -183,7 +266,24 @@ export class TRClient {
       subscription.unsubscribe();
     }
   }
+
+  #isAuthenticationError(error: Error): error is TRTopicError {
+    return error instanceof TRTopicError && error.errorCode === "AUTHENTICATION_ERROR";
+  }
+
+  #connect(): Promise<void> {
+    return (
+      this.#connectionUpdate?.then(() => this.#connection.connect()) ?? this.#connection.connect()
+    );
+  }
+
+  async #recoverConnection(error: TRTopicError): Promise<void> {
+    await this.#session.recover(error);
+    if (this.#session.validity !== "presumed-valid") {
+      throw new TRAuthError("The Session changed during authentication recovery");
+    }
+    await this.#connection.reconnect();
+  }
 }
 
-// oxlint-disable-next-line typescript/no-unsafe-declaration-merging -- Runtime accessors and this mapped type share the same Registry.
 export interface TRClient extends NamedTopicAccessors {}

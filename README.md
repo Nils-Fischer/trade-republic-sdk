@@ -4,8 +4,11 @@ An unofficial TypeScript SDK for Trade Republic's private API.
 
 > This project is not affiliated with Trade Republic. Its private API can change without notice.
 
-The package is under active development. It targets Node.js 22.4 and newer, Bun, browsers, and
-React Native. React bindings are isolated in the optional `trade-republic-sdk/react` entry point.
+The package is under active development. Public Topics target Node.js 22.4 and newer, Bun,
+browsers, and React Native. Sessions work directly in Node, Bun, and React Native. Browser Session
+export and Refresh scheduling require an injected cookie-capable transport because browser
+`fetch` hides `HttpOnly` cookies. React bindings are isolated in the optional
+`trade-republic-sdk/react` entry point.
 
 ## Install
 

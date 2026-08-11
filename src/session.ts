@@ -1,0 +1,477 @@
+import { type } from "arktype";
+import { decodeBase64 } from "./encoding.ts";
+import type { ResolvedEnvironment, TimerHandle } from "./environment.ts";
+import {
+  TRAbortError,
+  TRAuthError,
+  TRHttpError,
+  TRTimeoutError,
+  TRValidationError,
+} from "./errors.ts";
+
+const API_URL = "https://api.traderepublic.com";
+const LOGIN_PATH = "/api/v2/auth/web/login";
+const REFRESH_PATH = "/api/v1/auth/web/session";
+const DEFAULT_LOGIN_TIMEOUT_MS = 180_000;
+const DEFAULT_POLL_INTERVAL_MS = 2_000;
+const INITIAL_REFRESH_RETRY_MS = 5_000;
+const MAX_REFRESH_RETRY_MS = 60_000;
+
+const loginResponseSchema = type({ processId: "string" });
+const loginStatusSchema = type({
+  status: "string",
+  "expiresAt?": "string | null",
+});
+const sessionDataSchema = type({
+  version: "1",
+  cookies: "string[]",
+});
+const jwtClaimsSchema = type({
+  iat: "number",
+  exp: "number",
+});
+
+export type SessionValidity = "absent" | "presumed-valid" | "rejected";
+
+export interface LoginOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  pollIntervalMs?: number;
+}
+
+export interface Session {
+  readonly validity: SessionValidity;
+  readonly cookieHeader: string | undefined;
+  login(phoneNumber: string, pin: string, options?: LoginOptions): Promise<void>;
+  refresh(): Promise<void>;
+  markRejected(cause?: unknown): TRAuthError;
+  recover(cause?: unknown): Promise<void>;
+  export(): string | undefined;
+  logout(): void;
+}
+
+interface RequestOptions {
+  method: "GET" | "POST";
+  path: string;
+  body?: object;
+  cookies?: readonly string[];
+  signal?: AbortSignal;
+  rejectSession?: boolean;
+  sessionRevision?: number;
+}
+
+function cookieName(cookie: string): string {
+  if (/[\r\n]/.test(cookie)) throw new TRValidationError("A Session cookie contains a newline");
+  const separator = cookie.indexOf("=");
+  const name = separator > 0 ? cookie.slice(0, separator).trim() : "";
+  if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(name)) {
+    throw new TRValidationError("A Session cookie has an invalid name");
+  }
+  if (cookie.split(";").some((part) => part.trim() === "")) {
+    throw new TRValidationError(`Session cookie "${name}" has an empty attribute`);
+  }
+  return name;
+}
+
+function cookiePair(cookie: string): string {
+  return cookie.split(";", 1)[0]?.trim() ?? "";
+}
+
+function hasCookieValue(cookies: readonly string[], name: string): boolean {
+  return cookies.some((cookie) => {
+    if (cookieName(cookie) !== name) return false;
+    const pair = cookiePair(cookie);
+    return pair.slice(pair.indexOf("=") + 1).length > 0;
+  });
+}
+
+function mergeCookies(current: readonly string[], received: readonly string[]): string[] {
+  const merged = new Map<string, string>();
+
+  for (const cookie of [...current, ...received]) {
+    const name = cookieName(cookie);
+    merged.set(name, cookie);
+  }
+
+  return [...merged.values()];
+}
+
+function splitCombinedCookies(header: string): string[] {
+  const cookies: string[] = [];
+  let start = 0;
+  let quoted = false;
+
+  for (let index = 0; index < header.length; index += 1) {
+    if (header[index] === '"') quoted = !quoted;
+    if (header[index] !== "," || quoted) continue;
+
+    const rest = header.slice(index + 1);
+    if (!/^\s*[^=;,\s]+\s*=/.test(rest)) continue;
+    cookies.push(header.slice(start, index).trim());
+    start = index + 1;
+  }
+
+  const last = header.slice(start).trim();
+  if (last) cookies.push(last);
+  return cookies;
+}
+
+function responseCookies(response: Response): string[] {
+  const getSetCookie = (response.headers as { getSetCookie?: () => string[] }).getSetCookie;
+  const separate = getSetCookie?.call(response.headers) ?? [];
+  if (separate.length > 0) return separate;
+
+  const combined = response.headers.get("set-cookie");
+  return combined ? splitCombinedCookies(combined) : [];
+}
+
+async function parseJson(response: Response): Promise<unknown> {
+  return response.json().catch((cause: unknown) => {
+    throw new TRValidationError("Trade Republic returned invalid JSON", { cause });
+  });
+}
+
+function validate<Value>(schema: { assert(value: unknown): Value }, value: unknown, name: string) {
+  try {
+    return schema.assert(value);
+  } catch (cause) {
+    throw new TRValidationError(`Invalid ${name}`, { cause });
+  }
+}
+
+function decodeClaims(cookie: string): typeof jwtClaimsSchema.infer {
+  try {
+    const jwt = cookiePair(cookie).slice(cookiePair(cookie).indexOf("=") + 1);
+    const payload = jwt.split(".")[1];
+    if (!payload) throw new Error("The JWT has no payload");
+    const base64 = payload
+      .replaceAll("-", "+")
+      .replaceAll("_", "/")
+      .padEnd(Math.ceil(payload.length / 4) * 4, "=");
+    const claims = jwtClaimsSchema.assert(JSON.parse(decodeBase64(base64)));
+    if (claims.exp <= claims.iat) throw new Error("The JWT lifetime is not positive");
+    return claims;
+  } catch (cause) {
+    throw new TRValidationError("The tr_session cookie has invalid JWT claims", { cause });
+  }
+}
+
+function wait(
+  environment: ResolvedEnvironment,
+  delayMs: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(loginCancellation(signal));
+  }
+  if (delayMs === 0) return Promise.resolve();
+
+  return new Promise<void>((resolve, reject) => {
+    const timer = environment.clock.setTimeout(() => {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    }, delayMs);
+    const abort = (): void => {
+      environment.clock.clearTimeout(timer);
+      reject(loginCancellation(signal));
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+}
+
+function loginCancellation(signal?: AbortSignal): TRAbortError | TRTimeoutError {
+  return signal?.reason instanceof TRTimeoutError
+    ? signal.reason
+    : new TRAbortError("Login was aborted", { cause: signal?.reason });
+}
+
+export function createSession(environment: ResolvedEnvironment, serialized?: string): Session {
+  let cookies: string[] = [];
+  let validity: SessionValidity = "absent";
+  let refreshTimer: TimerHandle | undefined;
+  let refreshPromise: Promise<void> | undefined;
+  let refreshRetryMs = INITIAL_REFRESH_RETRY_MS;
+  let revision = 0;
+  const deviceInfoHeader = environment.deviceInfo;
+
+  const clearRefreshTimer = (): void => {
+    if (refreshTimer === undefined) return;
+    environment.clock.clearTimeout(refreshTimer);
+    refreshTimer = undefined;
+  };
+
+  const markRejected = (cause?: unknown): TRAuthError => {
+    clearRefreshTimer();
+    validity = cookies.length > 0 ? "rejected" : "absent";
+    return new TRAuthError("Trade Republic rejected the Session", { cause });
+  };
+
+  const request = async (options: RequestOptions): Promise<Response> => {
+    const headers: Record<string, string> = {
+      Accept: "application/json, text/plain, */*",
+      "Accept-Language": "en",
+      "Content-Type": "application/json",
+      "X-TR-App-Version": "15.97.5",
+      "X-TR-Device-Info": deviceInfoHeader,
+      "X-TR-Platform": "web-pro",
+    };
+    const cookie = options.cookies?.map(cookiePair).filter(Boolean).join("; ");
+    if (cookie) headers.Cookie = cookie;
+
+    let response: Response;
+    try {
+      response = await environment.fetch(`${API_URL}${options.path}`, {
+        method: options.method,
+        headers,
+        body: options.body ? JSON.stringify(options.body) : undefined,
+        credentials: "include",
+        signal: options.signal,
+      });
+    } catch (cause) {
+      if (options.signal?.aborted) {
+        throw loginCancellation(options.signal);
+      }
+      throw new TRHttpError(0, "Could not reach Trade Republic", { cause });
+    }
+
+    if (response.ok) return response;
+    if (options.rejectSession && (response.status === 401 || response.status === 403)) {
+      if (options.sessionRevision !== undefined && options.sessionRevision !== revision) {
+        throw new TRAbortError("The Session changed while Refresh was in flight");
+      }
+      throw markRejected(response);
+    }
+    throw new TRHttpError(response.status, `Trade Republic returned HTTP ${response.status}`);
+  };
+
+  const scheduleRefresh = (
+    nextCookies: readonly string[] = cookies,
+    timerRevision = revision,
+  ): void => {
+    const sessionCookie = nextCookies.find((cookie) => cookieName(cookie) === "tr_session");
+    if (!sessionCookie) throw new TRValidationError("The Session has no tr_session cookie");
+
+    const claims = decodeClaims(sessionCookie);
+    const expiresAt = claims.exp * 1_000;
+    const startsAt = claims.iat * 1_000;
+    const refreshAt = startsAt + (expiresAt - startsAt) * 0.8;
+    clearRefreshTimer();
+    refreshTimer = environment.clock.setTimeout(
+      () => {
+        refreshTimer = undefined;
+        void runScheduledRefresh(timerRevision);
+      },
+      Math.max(0, refreshAt - environment.clock.now()),
+    );
+  };
+
+  const scheduleRefreshRetry = (timerRevision: number): void => {
+    if (validity !== "presumed-valid" || timerRevision !== revision) return;
+    clearRefreshTimer();
+    const delayMs = refreshRetryMs;
+    refreshRetryMs = Math.min(refreshRetryMs * 2, MAX_REFRESH_RETRY_MS);
+    refreshTimer = environment.clock.setTimeout(() => {
+      refreshTimer = undefined;
+      void runScheduledRefresh(timerRevision);
+    }, delayMs);
+  };
+
+  const runScheduledRefresh = async (timerRevision: number): Promise<void> => {
+    if (timerRevision !== revision) return;
+    try {
+      await refresh();
+    } catch {
+      scheduleRefreshRetry(timerRevision);
+    }
+  };
+
+  const performRefresh = async (): Promise<void> => {
+    if (validity === "absent") throw markRejected();
+    const sessionRevision = revision;
+    const response = await request({
+      method: "GET",
+      path: REFRESH_PATH,
+      cookies,
+      rejectSession: true,
+      sessionRevision,
+    });
+    if (sessionRevision !== revision) {
+      throw new TRAbortError("The Session changed while Refresh was in flight");
+    }
+    const received = responseCookies(response);
+    if (!received.some((cookie) => cookieName(cookie) === "tr_session")) {
+      throw new TRValidationError("Refresh returned no tr_session cookie");
+    }
+    const refreshedCookies = mergeCookies(cookies, received);
+    scheduleRefresh(refreshedCookies);
+    refreshRetryMs = INITIAL_REFRESH_RETRY_MS;
+    cookies = refreshedCookies;
+    validity = "presumed-valid";
+  };
+
+  const refresh = (): Promise<void> => {
+    if (refreshPromise) return refreshPromise;
+    const current = performRefresh().finally(() => {
+      if (refreshPromise === current) refreshPromise = undefined;
+    });
+    refreshPromise = current;
+    return current;
+  };
+
+  const recover = async (cause?: unknown): Promise<void> => {
+    markRejected(cause);
+    await refresh();
+  };
+
+  const performLogin = async (
+    phoneNumber: string,
+    pin: string,
+    pollIntervalMs: number,
+    signal: AbortSignal,
+    sessionRevision: number,
+  ): Promise<void> => {
+    const initial = await request({
+      method: "POST",
+      path: LOGIN_PATH,
+      body: { phoneNumber, pin },
+      cookies,
+      signal,
+    });
+    const loginResponse = validate(loginResponseSchema, await parseJson(initial), "Login response");
+    let receivedLoginCookies = responseCookies(initial);
+    let pendingCookies = mergeCookies(cookies, receivedLoginCookies);
+
+    for (;;) {
+      const response = await request({
+        method: "GET",
+        path: `${LOGIN_PATH}/processes/${encodeURIComponent(loginResponse.processId)}`,
+        cookies: pendingCookies,
+        signal,
+      });
+      const received = responseCookies(response);
+      receivedLoginCookies = mergeCookies(receivedLoginCookies, received);
+      pendingCookies = mergeCookies(pendingCookies, received);
+      const status = validate(loginStatusSchema, await parseJson(response), "Login status");
+
+      if (status.status === "CONFIRMED") {
+        if (
+          !hasCookieValue(receivedLoginCookies, "tr_session") ||
+          !hasCookieValue(receivedLoginCookies, "tr_refresh")
+        ) {
+          throw new TRValidationError("Login returned no fresh Session cookies");
+        }
+        if (sessionRevision !== revision) {
+          throw new TRAbortError("The Session changed while Login was in flight");
+        }
+        scheduleRefresh(pendingCookies, revision + 1);
+        revision += 1;
+        refreshPromise = undefined;
+        refreshRetryMs = INITIAL_REFRESH_RETRY_MS;
+        cookies = pendingCookies;
+        validity = "presumed-valid";
+        return;
+      }
+      if (status.status !== "PENDING") {
+        throw new TRAuthError(`Login failed with status ${status.status}`);
+      }
+      if (status.expiresAt) {
+        const expiresAt = environment.parseDate(status.expiresAt);
+        if (!Number.isFinite(expiresAt)) {
+          throw new TRValidationError("Login status has an invalid expiresAt value");
+        }
+        if (expiresAt <= environment.clock.now()) {
+          throw new TRAuthError("Login approval expired");
+        }
+      }
+
+      await wait(environment, pollIntervalMs, signal);
+    }
+  };
+
+  const login = (phoneNumber: string, pin: string, options: LoginOptions = {}): Promise<void> => {
+    const timeoutMs = options.timeoutMs ?? DEFAULT_LOGIN_TIMEOUT_MS;
+    const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+    if (timeoutMs <= 0) {
+      return Promise.reject(new TRValidationError("timeoutMs must be greater than zero"));
+    }
+    if (pollIntervalMs < 0) {
+      return Promise.reject(new TRValidationError("pollIntervalMs must not be negative"));
+    }
+    if (options.signal?.aborted) {
+      return Promise.reject(loginCancellation(options.signal));
+    }
+
+    const controller = environment.createAbortController();
+    const timeoutError = new TRTimeoutError(`Login timed out after ${timeoutMs} ms`, timeoutMs);
+    const timeout = environment.clock.setTimeout(() => controller.abort(timeoutError), timeoutMs);
+    const abort = (): void => controller.abort(options.signal?.reason);
+    options.signal?.addEventListener("abort", abort, { once: true });
+
+    const sessionRevision = revision;
+    return performLogin(
+      phoneNumber,
+      pin,
+      pollIntervalMs,
+      controller.signal,
+      sessionRevision,
+    ).finally(() => {
+      environment.clock.clearTimeout(timeout);
+      options.signal?.removeEventListener("abort", abort);
+    });
+  };
+
+  const restore = (value: string): void => {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(value);
+    } catch (cause) {
+      throw new TRValidationError("Invalid exported Session", { cause });
+    }
+    const data = validate(sessionDataSchema, parsed, "exported Session");
+    const names = data.cookies.map(cookieName);
+    if (new Set(names).size !== names.length) {
+      throw new TRValidationError("The exported Session has duplicate cookie names");
+    }
+    const restoredCookies = mergeCookies([], data.cookies);
+    if (!hasCookieValue(restoredCookies, "tr_refresh")) {
+      throw new TRValidationError("The Session has no tr_refresh cookie");
+    }
+    scheduleRefresh(restoredCookies, revision + 1);
+    revision += 1;
+    refreshPromise = undefined;
+    refreshRetryMs = INITIAL_REFRESH_RETRY_MS;
+    cookies = restoredCookies;
+    validity = "presumed-valid";
+  };
+
+  if (serialized !== undefined) restore(serialized);
+
+  return {
+    get validity() {
+      return validity;
+    },
+    get cookieHeader() {
+      if (validity !== "presumed-valid") return undefined;
+      return cookies.map(cookiePair).filter(Boolean).join("; ");
+    },
+    login,
+    refresh,
+    markRejected,
+    recover,
+    export: () =>
+      cookies.length > 0
+        ? JSON.stringify({
+            version: 1,
+            cookies,
+          })
+        : undefined,
+    logout: () => {
+      clearRefreshTimer();
+      revision += 1;
+      refreshPromise = undefined;
+      refreshRetryMs = INITIAL_REFRESH_RETRY_MS;
+      cookies = [];
+      validity = "absent";
+    },
+  };
+}

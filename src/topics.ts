@@ -26,6 +26,16 @@ export const TickerResponseSchema = type({
 
 export type TickerResponse = typeof TickerResponseSchema.infer;
 
+export const CashRequestSchema = type({ "[string]": "never" });
+export type CashRequest = typeof CashRequestSchema.infer;
+
+export const CashResponseSchema = type({
+  accountNumber: "string",
+  currencyId: "string",
+  amount: "number",
+}).array();
+export type CashResponse = typeof CashResponseSchema.infer;
+
 /** The single source of truth for Trade Republic WebSocket Topics. */
 export const topicRegistry = {
   ticker: {
@@ -33,7 +43,16 @@ export const topicRegistry = {
     response: TickerResponseSchema,
     secured: false,
   },
+  cash: {
+    request: CashRequestSchema,
+    response: CashResponseSchema,
+    secured: true,
+  },
 } as const;
+
+export function isSecuredTopic(name: TopicName): boolean {
+  return topicRegistry[name].secured;
+}
 
 export type TopicName = keyof typeof topicRegistry;
 export type TopicRequest<Name extends TopicName> = (typeof topicRegistry)[Name]["request"]["infer"];

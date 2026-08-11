@@ -1,7 +1,24 @@
-import { describe, expect, test, vi } from "vite-plus/test";
+import { afterEach, describe, expect, test, vi } from "vite-plus/test";
+import { decodeBase64 } from "../src/encoding.ts";
 import { resolveEnvironment } from "../src/environment.ts";
 import { TRClient, TRValidationError } from "../src/index.ts";
 import { FakeClock } from "../src/testing.ts";
+
+interface SocketConstructorCall {
+  readonly url: string;
+  readonly second?: string | string[] | object;
+  readonly third?: object;
+}
+
+function recordingWebSocket(calls: SocketConstructorCall[]): typeof WebSocket {
+  return class {
+    constructor(url: string, second?: string | string[] | object, third?: object) {
+      calls.push({ url, second, third });
+    }
+  } as unknown as typeof WebSocket;
+}
+
+afterEach(() => vi.unstubAllGlobals());
 
 describe("environment", () => {
   test("keeps injected dependencies", () => {
@@ -9,7 +26,7 @@ describe("environment", () => {
     const fetch = vi.fn<typeof globalThis.fetch>();
     const socket = vi.fn();
 
-    expect(resolveEnvironment({ clock, fetch, socket })).toEqual({ clock, fetch, socket });
+    expect(resolveEnvironment({ clock, fetch, socket })).toMatchObject({ clock, fetch, socket });
   });
 
   test("resolves real defaults", () => {
@@ -18,6 +35,57 @@ describe("environment", () => {
     expect(environment.fetch).toBe(globalThis.fetch);
     expect(environment.socket).toBeTypeOf("function");
     expect(environment.clock.now()).toBeGreaterThan(0);
+  });
+
+  test("passes authenticated headers through Node WebSocketInit", () => {
+    const calls: SocketConstructorCall[] = [];
+    vi.stubGlobal("WebSocket", recordingWebSocket(calls));
+
+    resolveEnvironment().socket("wss://example.test", ["protocol"], {
+      headers: { Cookie: "session=abc" },
+    });
+
+    expect(calls).toEqual([
+      {
+        url: "wss://example.test",
+        second: {
+          protocols: ["protocol"],
+          headers: { Cookie: "session=abc" },
+        },
+        third: undefined,
+      },
+    ]);
+  });
+
+  test("passes authenticated headers through React Native socket options", () => {
+    const calls: SocketConstructorCall[] = [];
+    vi.stubGlobal("WebSocket", recordingWebSocket(calls));
+    vi.stubGlobal("navigator", { product: "ReactNative" });
+
+    resolveEnvironment().socket("wss://example.test", ["protocol"], {
+      headers: { Cookie: "session=abc" },
+    });
+
+    expect(calls).toEqual([
+      {
+        url: "wss://example.test",
+        second: ["protocol"],
+        third: { headers: { Cookie: "session=abc" } },
+      },
+    ]);
+  });
+
+  test("does not require browser encoding globals in React Native", () => {
+    vi.stubGlobal("navigator", { product: "ReactNative" });
+    vi.stubGlobal("TextEncoder", undefined);
+    vi.stubGlobal("btoa", undefined);
+    vi.stubGlobal("atob", undefined);
+
+    const environment = resolveEnvironment();
+
+    expect(environment.deviceInfo).toBeTypeOf("string");
+    expect(decodeBase64("eyJpYXQiOjEsImV4cCI6Mn0=")).toBe('{"iat":1,"exp":2}');
+    expect(() => new TRClient()).not.toThrow();
   });
 
   test("advances time and scheduled work without waiting", () => {

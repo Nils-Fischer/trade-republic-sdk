@@ -165,10 +165,11 @@ Frames.
     token deterministically, so that recovery paths are tested rather than hoped for.
 54. As an SDK consumer, I want the SDK importable without pulling in React, so that a server-side
     consumer installs nothing it does not need.
-55. As an SDK consumer, I want it to work in Node, Bun, the browser and React Native, so that I
-    can share code across my app and my scripts.
-56. As an SDK consumer, I want `ws` to remain an optional peer dependency, so that runtimes with
-    a built-in WebSocket install nothing extra.
+55. As an SDK consumer, I want Public Topics to work in Node, Bun, the browser and React Native,
+    and full Session support in Node, Bun and React Native, so that one package covers each
+    runtime without claiming access to browser-hidden `HttpOnly` cookies.
+56. As an SDK consumer, I want the built-in WebSocket used in each supported runtime, so that I
+    do not need a `ws` dependency.
 
 ## Implementation Decisions
 
@@ -219,6 +220,11 @@ exported and restored as an opaque serializable value; the cookie array is not t
 contract. Cookie handling preserves attributes rather than reducing each cookie to `name=value`,
 and retains the load-balancer affinity cookie alongside the auth cookies.
 
+Native browser `fetch` does not expose `Set-Cookie`, especially `HttpOnly` cookies. It therefore
+cannot provide the cookie values needed for Refresh scheduling and Session export. Public Topics
+work in browsers. Full browser Session support requires an injected cookie-capable transport,
+such as an application proxy. Node, Bun and React Native support Sessions directly.
+
 ### Protocol
 
 The wire is line-oriented: a Request ID, a Frame kind, and a payload. Snapshot and Delta carry
@@ -264,8 +270,8 @@ the wire that the old catalog was missing.
 ### Packaging
 
 One package with subpath exports: the root, a React entry point, and a testing entry point. React
-is an optional peer dependency; `ws` remains an optional peer dependency. Published under the
-existing package name as a new minor with no compatibility layer.
+is an optional peer dependency. Supported runtimes use their built-in WebSocket. Published under
+the existing package name as a new minor with no compatibility layer.
 
 ## Testing Decisions
 
