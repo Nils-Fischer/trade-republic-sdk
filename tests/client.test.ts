@@ -51,6 +51,10 @@ async function acceptConnection(socket: FakeSocket): Promise<void> {
   await Promise.resolve();
 }
 
+async function flush(): Promise<void> {
+  for (let count = 0; count < 8; count += 1) await Promise.resolve();
+}
+
 describe("TRClient public Topics", () => {
   test("installs one named accessor for every Registry Topic", () => {
     const client = createTestClient({ socket: () => new FakeSocket() });
@@ -281,6 +285,26 @@ describe("TRClient public Topics", () => {
       cause,
     });
   });
+
+  test("does not recover a transport that fails before its acknowledgement", async () => {
+    const clock = new FakeClock();
+    const sockets: FakeSocket[] = [];
+    const client = createTestClient({
+      clock,
+      socket: () => {
+        const socket = new FakeSocket(clock);
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    const result = client.ticker.get({ id: instrumentId });
+    sockets[0]!.open();
+    sockets[0]!.drop();
+
+    await expect(result).rejects.toBeInstanceOf(TRConnectionError);
+    clock.advanceBy(60_000);
+    expect(sockets).toHaveLength(1);
+  });
 });
 
 describe("Topic Watches", () => {
@@ -347,5 +371,376 @@ describe("Topic Watches", () => {
     });
     await expect(workingNext).resolves.toEqual({ done: false, value: ticker("20") });
     await working.return?.();
+  });
+
+  test("keeps Watches across one shared replacement while a Get fails once", async () => {
+    const clock = new FakeClock();
+    const sockets: FakeSocket[] = [];
+    const client = createTestClient({
+      clock,
+      socket: () => {
+        const socket = new FakeSocket(clock);
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    const firstWatch = client.ticker.watch({ id: instrumentId })[Symbol.asyncIterator]();
+    const secondWatch = client.ticker.watch({ id: "US70450Y1038.LSX" })[Symbol.asyncIterator]();
+    const firstValue = firstWatch.next();
+    const secondValue = secondWatch.next();
+    const get = client.ticker.get({ id: instrumentId });
+    await acceptConnection(sockets[0]!);
+    const [firstId, secondId] = subscriptionIds(sockets[0]!);
+    sockets[0]!.receive(snapshotFrame(firstId!, ticker("1")));
+    sockets[0]!.receive(snapshotFrame(secondId!, ticker("2")));
+    await Promise.all([firstValue, secondValue]);
+
+    sockets[0]!.drop();
+    await expect(get).rejects.toBeInstanceOf(TRConnectionError);
+    expect(sockets[0]!.sent.filter((line) => line.startsWith("sub "))).toHaveLength(3);
+    clock.advanceBy(1_000);
+    expect(sockets).toHaveLength(2);
+    sockets[1]!.open();
+    expect(subscriptionIds(sockets[1]!)).toEqual([]);
+    sockets[1]!.receive("connected");
+    await flush();
+
+    expect(subscriptionIds(sockets[1]!)).toEqual([firstId, secondId]);
+    await firstWatch.return?.();
+    await secondWatch.return?.();
+  });
+
+  test("requires a fresh Snapshot after recovery, then resumes Deltas", async () => {
+    const clock = new FakeClock();
+    const sockets: FakeSocket[] = [];
+    const client = createTestClient({
+      clock,
+      socket: () => {
+        const socket = new FakeSocket(clock);
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    const iterator = client.ticker.watch({ id: instrumentId })[Symbol.asyncIterator]();
+    const first = iterator.next();
+    await acceptConnection(sockets[0]!);
+    const [requestId] = subscriptionIds(sockets[0]!);
+    const oldValue = ticker("10");
+    sockets[0]!.receive(snapshotFrame(requestId!, oldValue));
+    await first;
+
+    const next = iterator.next();
+    let settled = false;
+    void next.then(() => {
+      settled = true;
+    });
+    sockets[0]!.drop();
+    clock.advanceBy(1_000);
+    await acceptConnection(sockets[1]!);
+    const freshValue = ticker("20", 2);
+    const newerValue = ticker("21", 3);
+    const oldJson = JSON.stringify(oldValue);
+    const freshJson = JSON.stringify(freshValue);
+    const newerJson = JSON.stringify(newerValue);
+    sockets[1]!.receive(`${requestId} D -${oldJson.length}\t+${encodeURIComponent(freshJson)}`);
+    await flush();
+    expect(settled).toBe(false);
+    sockets[1]!.receive(snapshotFrame(requestId!, freshValue));
+    await expect(next).resolves.toEqual({ done: false, value: freshValue });
+
+    const afterSnapshot = iterator.next();
+    sockets[1]!.receive(`${requestId} D -${freshJson.length}\t+${encodeURIComponent(newerJson)}`);
+    await expect(afterSnapshot).resolves.toEqual({ done: false, value: newerValue });
+    await iterator.return?.();
+  });
+
+  test("does not yield a queued pre-drop Snapshot after recovery", async () => {
+    const clock = new FakeClock();
+    const sockets: FakeSocket[] = [];
+    const client = createTestClient({
+      clock,
+      socket: () => {
+        const socket = new FakeSocket(clock);
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    const iterator = client.ticker.watch({ id: instrumentId })[Symbol.asyncIterator]();
+    const first = iterator.next();
+    await acceptConnection(sockets[0]!);
+    const [requestId] = subscriptionIds(sockets[0]!);
+    sockets[0]!.receive(snapshotFrame(requestId!, ticker("1")));
+    await first;
+    sockets[0]!.receive(snapshotFrame(requestId!, ticker("stale")));
+    sockets[0]!.drop();
+    clock.advanceBy(1_000);
+    await acceptConnection(sockets[1]!);
+
+    const next = iterator.next();
+    let settled = false;
+    void next.then(() => {
+      settled = true;
+    });
+    await flush();
+    expect(settled).toBe(false);
+    sockets[1]!.receive(snapshotFrame(requestId!, ticker("fresh")));
+    await expect(next).resolves.toEqual({ done: false, value: ticker("fresh") });
+    await iterator.return?.();
+  });
+
+  test("ignores replacement Topic frames before the connected acknowledgement", async () => {
+    const clock = new FakeClock();
+    const sockets: FakeSocket[] = [];
+    const client = createTestClient({
+      clock,
+      socket: () => {
+        const socket = new FakeSocket(clock);
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    const iterator = client.ticker.watch({ id: instrumentId })[Symbol.asyncIterator]();
+    const first = iterator.next();
+    await acceptConnection(sockets[0]!);
+    const [requestId] = subscriptionIds(sockets[0]!);
+    sockets[0]!.receive(snapshotFrame(requestId!, ticker("old")));
+    await first;
+    sockets[0]!.drop();
+    clock.advanceBy(1_000);
+    sockets[1]!.open();
+
+    const next = iterator.next();
+    let settled = false;
+    void next.then(() => {
+      settled = true;
+    });
+    sockets[1]!.receive(snapshotFrame(requestId!, ticker("premature")));
+    await flush();
+    expect(settled).toBe(false);
+    expect(subscriptionIds(sockets[1]!)).toEqual([]);
+    sockets[1]!.receive("connected");
+    sockets[1]!.receive(snapshotFrame(requestId!, ticker("fresh")));
+
+    await expect(next).resolves.toEqual({ done: false, value: ticker("fresh") });
+    await iterator.return?.();
+  });
+
+  test("retries reconnects at 1, 2, 4, 8, 16, then 30 seconds", async () => {
+    const clock = new FakeClock();
+    const sockets: FakeSocket[] = [];
+    const client = createTestClient({
+      clock,
+      socket: () => {
+        const socket = new FakeSocket(clock);
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    const iterator = client.ticker.watch({ id: instrumentId })[Symbol.asyncIterator]();
+    const first = iterator.next();
+    await acceptConnection(sockets[0]!);
+    const [requestId] = subscriptionIds(sockets[0]!);
+    sockets[0]!.receive(snapshotFrame(requestId!, ticker("1")));
+    await first;
+    sockets[0]!.drop();
+
+    const delays = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000];
+    for (const [index, delay] of delays.entries()) {
+      clock.advanceBy(delay - 1);
+      expect(sockets).toHaveLength(index + 1);
+      clock.advanceBy(1);
+      expect(sockets).toHaveLength(index + 2);
+      sockets.at(-1)!.drop();
+      await flush();
+    }
+    await iterator.return?.();
+  });
+
+  test("resets backoff after a successful reconnect", async () => {
+    const clock = new FakeClock();
+    const sockets: FakeSocket[] = [];
+    const client = createTestClient({
+      clock,
+      socket: () => {
+        const socket = new FakeSocket(clock);
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    const iterator = client.ticker.watch({ id: instrumentId })[Symbol.asyncIterator]();
+    const first = iterator.next();
+    await acceptConnection(sockets[0]!);
+    const [requestId] = subscriptionIds(sockets[0]!);
+    sockets[0]!.receive(snapshotFrame(requestId!, ticker("1")));
+    await first;
+    sockets[0]!.drop();
+    clock.advanceBy(1_000);
+    sockets[1]!.drop();
+    await flush();
+    clock.advanceBy(2_000);
+    await acceptConnection(sockets[2]!);
+
+    sockets[2]!.drop();
+    clock.advanceBy(999);
+    expect(sockets).toHaveLength(3);
+    clock.advanceBy(1);
+    expect(sockets).toHaveLength(4);
+    await iterator.return?.();
+  });
+
+  test("keeps recovering when an acknowledged replacement drops immediately", async () => {
+    const clock = new FakeClock();
+    const sockets: FakeSocket[] = [];
+    const client = createTestClient({
+      clock,
+      socket: () => {
+        const socket = new FakeSocket(clock);
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    const iterator = client.ticker.watch({ id: instrumentId })[Symbol.asyncIterator]();
+    const first = iterator.next();
+    await acceptConnection(sockets[0]!);
+    const [requestId] = subscriptionIds(sockets[0]!);
+    sockets[0]!.receive(snapshotFrame(requestId!, ticker("1")));
+    await first;
+    sockets[0]!.drop();
+    clock.advanceBy(1_000);
+    sockets[1]!.open();
+    sockets[1]!.receive("connected");
+    sockets[1]!.drop();
+    await flush();
+
+    clock.advanceBy(999);
+    expect(sockets).toHaveLength(2);
+    clock.advanceBy(1);
+    expect(sockets).toHaveLength(3);
+    await iterator.return?.();
+  });
+
+  test("starts one recovery for an error followed by close", async () => {
+    const clock = new FakeClock();
+    const sockets: FakeSocket[] = [];
+    const client = createTestClient({
+      clock,
+      socket: () => {
+        const socket = new FakeSocket(clock);
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    const iterator = client.ticker.watch({ id: instrumentId })[Symbol.asyncIterator]();
+    const first = iterator.next();
+    await acceptConnection(sockets[0]!);
+    const [requestId] = subscriptionIds(sockets[0]!);
+    sockets[0]!.receive(snapshotFrame(requestId!, ticker("1")));
+    await first;
+    const close = sockets[0]!.onclose;
+    sockets[0]!.fail();
+    close?.({ code: 1_006, reason: "lost", wasClean: false });
+
+    clock.advanceBy(1_000);
+    expect(sockets).toHaveLength(2);
+    await iterator.return?.();
+  });
+
+  test("recovers when an Echo reply is missing", async () => {
+    const clock = new FakeClock();
+    const sockets: FakeSocket[] = [];
+    const client = createTestClient({
+      clock,
+      socket: () => {
+        const socket = new FakeSocket(clock);
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    const iterator = client.ticker.watch({ id: instrumentId })[Symbol.asyncIterator]();
+    const first = iterator.next();
+    await acceptConnection(sockets[0]!);
+    const [requestId] = subscriptionIds(sockets[0]!);
+    sockets[0]!.receive(snapshotFrame(requestId!, ticker("1")));
+    await first;
+
+    clock.advanceBy(5_000);
+    expect(sockets[0]!.readyState).toBe(sockets[0]!.CLOSED);
+    clock.advanceBy(1_000);
+    expect(sockets).toHaveLength(2);
+    await iterator.return?.();
+  });
+
+  test("cancelling the final Watch during backoff stops recovery", async () => {
+    const clock = new FakeClock();
+    const sockets: FakeSocket[] = [];
+    const client = createTestClient({
+      clock,
+      socket: () => {
+        const socket = new FakeSocket(clock);
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    const iterator = client.ticker.watch({ id: instrumentId })[Symbol.asyncIterator]();
+    const first = iterator.next();
+    await acceptConnection(sockets[0]!);
+    const [requestId] = subscriptionIds(sockets[0]!);
+    sockets[0]!.receive(snapshotFrame(requestId!, ticker("1")));
+    await first;
+    sockets[0]!.drop();
+
+    await iterator.return?.();
+    clock.advanceBy(30_000);
+    expect(sockets).toHaveLength(1);
+  });
+
+  test("Logout during backoff stops recovery", async () => {
+    const clock = new FakeClock();
+    const sockets: FakeSocket[] = [];
+    const client = createTestClient({
+      clock,
+      socket: () => {
+        const socket = new FakeSocket(clock);
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    const iterator = client.ticker.watch({ id: instrumentId })[Symbol.asyncIterator]();
+    const pending = iterator.next();
+    await acceptConnection(sockets[0]!);
+    sockets[0]!.drop();
+    client.logout();
+    clock.advanceBy(60_000);
+
+    await expect(pending).rejects.toBeInstanceOf(TRConnectionError);
+    expect(sockets).toHaveLength(1);
+  });
+
+  test("Logout during recovery ignores late transport events", async () => {
+    const clock = new FakeClock();
+    const sockets: FakeSocket[] = [];
+    const client = createTestClient({
+      clock,
+      socket: () => {
+        const socket = new FakeSocket(clock);
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    const iterator = client.ticker.watch({ id: instrumentId })[Symbol.asyncIterator]();
+    const pending = iterator.next();
+    await acceptConnection(sockets[0]!);
+    sockets[0]!.drop();
+    clock.advanceBy(1_000);
+    const staleOpen = sockets[1]!.onopen;
+    const staleMessage = sockets[1]!.onmessage;
+    client.logout();
+    staleOpen?.();
+    staleMessage?.({ data: "connected" });
+    clock.advanceBy(60_000);
+
+    await expect(pending).rejects.toBeInstanceOf(TRConnectionError);
+    expect(sockets).toHaveLength(2);
+    expect(sockets[1]!.sent).toEqual([]);
   });
 });

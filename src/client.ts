@@ -316,6 +316,7 @@ export class TRClient {
             next: (value) => finish(() => resolve(value)),
             error: fail,
           },
+          "fail",
         );
       };
 
@@ -369,7 +370,11 @@ export class TRClient {
           wake?.();
           wake = undefined;
         },
+        reset: () => {
+          latest = undefined;
+        },
       },
+      "resume",
     );
 
     try {

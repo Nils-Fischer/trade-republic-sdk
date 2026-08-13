@@ -11,6 +11,7 @@ import { applyDelta, parseFrame } from "./protocol.ts";
 
 const SOCKET_URL = "wss://api.traderepublic.com";
 const ECHO_INTERVAL_MS = 2_500;
+const RECOVERY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000] as const;
 const CONNECT_FRAME = `connect 31 ${JSON.stringify({
   locale: "en",
   platformId: "webtrading",
@@ -21,6 +22,7 @@ const CONNECT_FRAME = `connect 31 ${JSON.stringify({
 export interface SubscriptionSink<Value> {
   next(value: Value): void;
   error(error: Error): void;
+  reset?(): void;
 }
 
 export interface SubscriptionControl {
@@ -29,9 +31,20 @@ export interface SubscriptionControl {
 
 interface ActiveSubscription {
   readonly payload: object;
+  readonly recovery: SubscriptionRecovery;
   previousPayload?: string;
+  needsResubscribe: boolean;
   accept(payload: string): boolean;
   fail(error: Error): void;
+  reset(): void;
+}
+
+type SubscriptionRecovery = "fail" | "resume";
+
+interface Deferred {
+  readonly promise: Promise<void>;
+  readonly resolve: () => void;
+  readonly reject: (error: Error) => void;
 }
 
 export interface Connection {
@@ -44,6 +57,7 @@ export interface Connection {
     payload: object,
     decode: (payload: string) => Value | undefined,
     sink: SubscriptionSink<Value>,
+    recoveryPolicy: SubscriptionRecovery,
   ): SubscriptionControl;
 }
 
@@ -54,43 +68,84 @@ export function createConnection(
   const subscriptions = new Map<number, ActiveSubscription>();
   let socket: Socket | undefined;
   let connectionPromise: Promise<void> | undefined;
-  let resolveConnection: (() => void) | undefined;
   let rejectConnection: ((error: Error) => void) | undefined;
+  let reconnectPromise: Promise<void> | undefined;
+  let recovery: Deferred | undefined;
+  let recoveryTimer: TimerHandle | undefined;
+  let recoveryDelayIndex = 0;
   let echoTimer: TimerHandle | undefined;
   let lastEcho: string | undefined;
+  let awaitingEcho = false;
   let nextRequestId = 1;
   let connected = false;
   let alive = false;
-  let reconnectPromise: Promise<void> | undefined;
-  let revision = 0;
+  let generation = 0;
 
   const clearEcho = (): void => {
-    if (echoTimer === undefined) return;
-    environment.clock.clearInterval(echoTimer);
+    if (echoTimer !== undefined) environment.clock.clearInterval(echoTimer);
     echoTimer = undefined;
+    lastEcho = undefined;
+    awaitingEcho = false;
   };
 
-  const reset = (error: TRConnectionError): void => {
-    revision += 1;
+  const clearRecoveryTimer = (): void => {
+    if (recoveryTimer !== undefined) environment.clock.clearTimeout(recoveryTimer);
+    recoveryTimer = undefined;
+  };
+
+  const detachSocket = (): void => {
+    const current = socket;
+    socket = undefined;
+    generation += 1;
+    if (!current) return;
+    current.onopen = null;
+    current.onmessage = null;
+    current.onerror = null;
+    current.onclose = null;
+    current.close();
+  };
+
+  const abandonTransport = (): void => {
     connected = false;
     alive = false;
     clearEcho();
-    failHandshake(error);
     connectionPromise = undefined;
-    const activeSubscriptions = [...subscriptions.values()];
-    subscriptions.clear();
-    activeSubscriptions.forEach((subscription) => subscription.fail(error));
+    rejectConnection = undefined;
+    detachSocket();
   };
+
+  const failSubscriptions = (
+    error: TRConnectionError,
+    predicate: (subscription: ActiveSubscription) => boolean,
+  ): void => {
+    for (const [requestId, subscription] of subscriptions) {
+      if (!predicate(subscription)) continue;
+      subscriptions.delete(requestId);
+      subscription.fail(error);
+    }
+  };
+
+  const hasRecoverableSubscriptions = (): boolean =>
+    [...subscriptions.values()].some((subscription) => subscription.recovery === "resume");
 
   const send = (line: string): void => {
     if (!socket) throw new TRConnectionError("The WebSocket does not exist");
     socket.send(line);
   };
 
-  const failHandshake = (error: Error): void => {
-    rejectConnection?.(error);
-    resolveConnection = undefined;
-    rejectConnection = undefined;
+  const finishRecovery = (): void => {
+    const current = recovery;
+    recovery = undefined;
+    recoveryDelayIndex = 0;
+    current?.resolve();
+  };
+
+  const cancelRecovery = (error: TRConnectionError): void => {
+    clearRecoveryTimer();
+    const current = recovery;
+    recovery = undefined;
+    recoveryDelayIndex = 0;
+    current?.reject(error);
   };
 
   const handleFrame = (raw: string): void => {
@@ -102,9 +157,7 @@ export function createConnection(
 
     switch (frame.kind) {
       case "snapshot":
-        if (subscription.accept(frame.payload)) {
-          subscription.previousPayload = frame.payload;
-        }
+        if (subscription.accept(frame.payload)) subscription.previousPayload = frame.payload;
         return;
       case "delta":
         if (subscription.previousPayload === undefined) return;
@@ -124,68 +177,33 @@ export function createConnection(
     }
   };
 
-  const sendEcho = (): void => {
-    const echo = `echo ${environment.clock.now()}`;
-    lastEcho = echo;
-    alive = false;
-    try {
-      send(echo);
-    } catch {
-      // A close event reports the connection failure to active operations.
+  const restoreSubscriptions = (): void => {
+    for (const [requestId, subscription] of subscriptions) {
+      if (!subscription.needsResubscribe) continue;
+      send(`sub ${requestId} ${JSON.stringify(subscription.payload)}`);
+      subscription.needsResubscribe = false;
     }
   };
 
-  const onOpen = (): void => {
-    try {
-      send(CONNECT_FRAME);
-      echoTimer = environment.clock.setInterval(sendEcho, ECHO_INTERVAL_MS);
-    } catch (cause) {
-      failHandshake(toConnectionError("Could not send the WebSocket handshake", cause));
+  const prepareSubscriptionsForRecovery = (): void => {
+    for (const subscription of subscriptions.values()) {
+      subscription.previousPayload = undefined;
+      subscription.needsResubscribe = true;
+      subscription.reset();
     }
   };
 
-  const onMessage = ({ data }: SocketMessageEvent): void => {
-    if (data === "connected") {
-      if (!connected) {
-        connected = true;
-        resolveConnection?.();
-        resolveConnection = undefined;
-        rejectConnection = undefined;
-      }
-      return;
-    }
+  let beginRecovery: (error: TRConnectionError) => void;
 
-    if (data.startsWith("echo ")) {
-      if (data === lastEcho) alive = true;
-      return;
-    }
-
-    handleFrame(data);
-  };
-
-  const onError = (event: SocketErrorEvent): void => {
-    alive = false;
-    if (!connected) {
-      failHandshake(
-        toConnectionError(
-          "The WebSocket failed before Trade Republic accepted it",
-          event.error ?? event,
-        ),
-      );
-    }
-  };
-
-  const onClose = (event: SocketCloseEvent): void => {
-    socket = undefined;
-    reset(new TRConnectionError("The WebSocket connection closed", { cause: event }));
-  };
-
-  const connect = (): Promise<void> => {
+  const openTransport = (): Promise<void> => {
     if (connected) return Promise.resolve();
     if (connectionPromise) return connectionPromise;
+
+    const transportGeneration = ++generation;
+    let currentSocket: Socket;
     try {
       const cookie = getCookieHeader();
-      socket = environment.socket(
+      currentSocket = environment.socket(
         SOCKET_URL,
         undefined,
         cookie
@@ -200,86 +218,188 @@ export function createConnection(
     } catch (cause) {
       return Promise.reject(toConnectionError("Could not create the WebSocket", cause));
     }
+    socket = currentSocket;
+
+    const isCurrent = (): boolean => generation === transportGeneration && socket === currentSocket;
 
     connectionPromise = new Promise<void>((resolve, reject) => {
-      resolveConnection = resolve;
       rejectConnection = reject;
+
+      const failHandshake = (error: TRConnectionError): void => {
+        if (!isCurrent()) return;
+        abandonTransport();
+        reject(error);
+      };
+
+      const loseEstablishedTransport = (error: TRConnectionError): void => {
+        if (!isCurrent()) return;
+        abandonTransport();
+        beginRecovery(error);
+        reject(error);
+      };
+
+      const sendEcho = (): void => {
+        if (!isCurrent() || !connected) return;
+        if (awaitingEcho) {
+          loseEstablishedTransport(new TRConnectionError("The WebSocket Echo was not returned"));
+          return;
+        }
+
+        const echo = `echo ${environment.clock.now()}`;
+        lastEcho = echo;
+        awaitingEcho = true;
+        alive = false;
+        try {
+          send(echo);
+        } catch (cause) {
+          loseEstablishedTransport(toConnectionError("Could not send the WebSocket Echo", cause));
+        }
+      };
+
+      currentSocket.onopen = () => {
+        if (!isCurrent()) return;
+        try {
+          send(CONNECT_FRAME);
+          echoTimer = environment.clock.setInterval(sendEcho, ECHO_INTERVAL_MS);
+        } catch (cause) {
+          failHandshake(toConnectionError("Could not send the WebSocket handshake", cause));
+        }
+      };
+
+      currentSocket.onmessage = ({ data }: SocketMessageEvent) => {
+        if (!isCurrent()) return;
+        if (data === "connected") {
+          if (connected) return;
+          connected = true;
+          recoveryDelayIndex = 0;
+          try {
+            restoreSubscriptions();
+          } catch (cause) {
+            loseEstablishedTransport(
+              toConnectionError("Could not restore the Topic subscriptions", cause),
+            );
+            return;
+          }
+          connectionPromise = undefined;
+          rejectConnection = undefined;
+          resolve();
+          return;
+        }
+
+        if (data.startsWith("echo ")) {
+          if (data === lastEcho) {
+            awaitingEcho = false;
+            alive = true;
+          }
+          return;
+        }
+
+        if (!connected) return;
+        handleFrame(data);
+      };
+
+      currentSocket.onerror = (event: SocketErrorEvent) => {
+        if (!isCurrent()) return;
+        const error = toConnectionError(
+          connected
+            ? "The WebSocket transport failed"
+            : "The WebSocket failed before Trade Republic accepted it",
+          event.error ?? event,
+        );
+        if (connected) loseEstablishedTransport(error);
+        else failHandshake(error);
+      };
+
+      currentSocket.onclose = (event: SocketCloseEvent) => {
+        if (!isCurrent()) return;
+        const wasConnected = connected;
+        const error = new TRConnectionError("The WebSocket connection closed", { cause: event });
+        if (wasConnected) loseEstablishedTransport(error);
+        else failHandshake(error);
+      };
     });
-    socket.onopen = onOpen;
-    socket.onmessage = onMessage;
-    socket.onerror = onError;
-    socket.onclose = onClose;
 
     return connectionPromise;
   };
 
-  const disconnect = (): void => {
-    const current = socket;
-    socket = undefined;
-    if (current) {
-      current.onopen = null;
-      current.onmessage = null;
-      current.onerror = null;
-      current.onclose = null;
-      current.close();
+  const scheduleRecovery = (): void => {
+    if (!recovery || recoveryTimer !== undefined || !hasRecoverableSubscriptions()) return;
+    const delay = RECOVERY_DELAYS_MS[Math.min(recoveryDelayIndex, RECOVERY_DELAYS_MS.length - 1)]!;
+    recoveryDelayIndex += 1;
+    recoveryTimer = environment.clock.setTimeout(() => {
+      recoveryTimer = undefined;
+      const currentRecovery = recovery;
+      if (!currentRecovery || !hasRecoverableSubscriptions()) return;
+      const attempt = openTransport();
+      const attemptGeneration = generation;
+      void attempt.then(
+        () => {
+          if (recovery === currentRecovery && connected && generation === attemptGeneration) {
+            finishRecovery();
+          }
+        },
+        () => {
+          if (recovery === currentRecovery) scheduleRecovery();
+        },
+      );
+    }, delay);
+  };
+
+  beginRecovery = (error: TRConnectionError): void => {
+    failSubscriptions(error, (subscription) => subscription.recovery === "fail");
+    prepareSubscriptionsForRecovery();
+    if (!hasRecoverableSubscriptions()) return;
+    if (!recovery) {
+      recovery = createDeferred();
+      void recovery.promise.catch(() => undefined);
     }
-    reset(new TRConnectionError("The WebSocket connection was closed by the client"));
+    scheduleRecovery();
+  };
+
+  const connect = (): Promise<void> => {
+    if (connected) return Promise.resolve();
+    return recovery?.promise ?? openTransport();
+  };
+
+  const disconnect = (): void => {
+    const error = new TRConnectionError("The WebSocket connection was closed by the client");
+    cancelRecovery(error);
+    rejectConnection?.(error);
+    reconnectPromise = undefined;
+    abandonTransport();
+    failSubscriptions(error, () => true);
   };
 
   const reconnect = (): Promise<void> => {
+    if (recovery) return recovery.promise;
     if (reconnectPromise) return reconnectPromise;
-    const reconnectRevision = revision;
+    if (connectionPromise) return connectionPromise;
 
-    const reconnecting = (async () => {
-      const current = socket;
-      socket = undefined;
-      if (current) {
-        current.onopen = null;
-        current.onmessage = null;
-        current.onerror = null;
-        current.onclose = null;
-        current.close();
-      }
-      connected = false;
-      alive = false;
-      clearEcho();
-      connectionPromise = undefined;
-      resolveConnection = undefined;
-      rejectConnection = undefined;
-      subscriptions.forEach((subscription) => {
-        subscription.previousPayload = undefined;
-      });
+    abandonTransport();
+    prepareSubscriptionsForRecovery();
 
-      await connect();
-      subscriptions.forEach((subscription, requestId) => {
-        try {
-          send(`sub ${requestId} ${JSON.stringify(subscription.payload)}`);
-        } catch (cause) {
-          subscriptions.delete(requestId);
-          subscription.fail(toConnectionError("Could not restore the Topic subscription", cause));
-        }
-      });
-    })().catch((cause: unknown) => {
+    const update = openTransport().catch((cause: unknown) => {
       const error = toConnectionError("Could not reconnect the WebSocket", cause);
-      if (revision === reconnectRevision) reset(error);
+      failSubscriptions(error, () => true);
       throw error;
     });
-
-    reconnectPromise = reconnecting.finally(() => {
-      reconnectPromise = undefined;
+    const result = update.finally(() => {
+      if (reconnectPromise === result) reconnectPromise = undefined;
     });
-    return reconnectPromise;
+    reconnectPromise = result;
+    return result;
   };
 
   const reconnectAfterLogin = (): Promise<void> | undefined => {
-    if (!socket) return undefined;
-    return connect().then(reconnect);
+    if (!socket && !connectionPromise && !recovery) return undefined;
+    return reconnect();
   };
 
   const subscribe = <Value>(
     payload: object,
     decode: (payload: string) => Value | undefined,
     sink: SubscriptionSink<Value>,
+    recoveryPolicy: SubscriptionRecovery,
   ): SubscriptionControl => {
     if (!connected) throw new TRConnectionError("The WebSocket is not connected");
 
@@ -287,6 +407,8 @@ export function createConnection(
     let active = true;
     const subscription: ActiveSubscription = {
       payload,
+      recovery: recoveryPolicy,
+      needsResubscribe: false,
       accept: (rawPayload) => {
         try {
           const value = decode(rawPayload);
@@ -303,9 +425,11 @@ export function createConnection(
         }
       },
       fail: (error) => {
+        if (!active) return;
         active = false;
         sink.error(error);
       },
+      reset: () => sink.reset?.(),
     };
     subscriptions.set(requestId, subscription);
 
@@ -322,6 +446,12 @@ export function createConnection(
         if (!active) return;
         active = false;
         subscriptions.delete(requestId);
+        if (recovery && !hasRecoverableSubscriptions()) {
+          const error = new TRConnectionError("Connection recovery was cancelled");
+          cancelRecovery(error);
+          rejectConnection?.(error);
+          abandonTransport();
+        }
         if (!connected) return;
         try {
           send(`unsub ${requestId}`);
@@ -342,4 +472,14 @@ export function createConnection(
     disconnect,
     subscribe,
   };
+}
+
+function createDeferred(): Deferred {
+  let resolve!: () => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }

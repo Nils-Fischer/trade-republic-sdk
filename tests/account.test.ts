@@ -643,6 +643,9 @@ describe("timeline pagination", () => {
     });
     const defaultTimedOut = defaultTimeoutClient.getTimelineTransactions({ from: new Date(0) });
     await accept(defaultTimeoutSocket);
+    for (let delay = 2_500; delay < 15_000; delay += 2_500) {
+      defaultTimeoutSocket.receive(`echo ${startTime + delay}`, delay);
+    }
     defaultClock.advanceBy(14_999);
     await flush();
     defaultClock.advanceBy(1);
