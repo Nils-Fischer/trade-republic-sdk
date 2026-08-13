@@ -427,6 +427,58 @@ describe("account resources", () => {
     await expect(result).resolves.toEqual(page);
   });
 
+  test("accepts observed structured timeline detail sections", async () => {
+    const socket = new FakeSocket();
+    const client = authenticatedClient({ socket: () => socket });
+    const result = client.timelineDetailV2.get({
+      id: "0194b436-5e9d-4000-8000-000000000001",
+    });
+    await accept(socket);
+    const [{ id }] = subscriptions(socket);
+    const detail = {
+      id: "sanitized-timeline-detail",
+      sections: [
+        {
+          title: "Sanitized header",
+          data: {
+            icon: { asset: "timeline", badge: null },
+            timestamp: "2026-01-01T00:00:00.000Z",
+            status: "EXECUTED",
+          },
+          type: "header",
+        },
+        {
+          data: [{ title: "Sanitized row", detail: {}, style: "plain" }],
+          type: "table",
+        },
+        {
+          title: "Sanitized documents",
+          data: [
+            {
+              title: "Sanitized document",
+              action: {
+                payload: { path: "/sanitized", shareable: false, title: "Sanitized document" },
+                type: "authenticatedBrowserModal",
+              },
+              id: "sanitized-document",
+              postboxType: "DOCUMENT",
+            },
+            {
+              title: "Sanitized legacy document",
+              action: { payload: "/sanitized", type: "browserModal" },
+              id: "sanitized-legacy-document",
+              postboxType: "DOCUMENT",
+            },
+          ],
+          type: "documents",
+        },
+      ],
+    };
+    socket.receive(snapshot(id, detail));
+
+    await expect(result).resolves.toEqual(detail);
+  });
+
   test("accepts observed named watchlist instrument timestamp variants", async () => {
     const socket = new FakeSocket();
     const client = authenticatedClient({ socket: () => socket });

@@ -44,6 +44,16 @@ vp test
 vp run build
 ```
 
+Run the opt-in, read-only account contract test before a release:
+
+```bash
+vp run test:live
+```
+
+The test prompts for the phone number and PIN without echo, then waits for approval in the Trade
+Republic app. It keeps credentials, the Session, and responses in memory. Output contains only
+accessor status, counts, and normalized schema paths. The test is not part of `vp test` or CI.
+
 ## License
 
 [MIT](./LICENSE)

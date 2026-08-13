@@ -157,16 +157,27 @@ export type TimelineActionsV2Response = typeof TimelineActionsV2ResponseSchema.i
 
 export const TimelineDetailV2RequestSchema = type({ id: UUIDSchema, "+": "reject" });
 export type TimelineDetailV2Request = typeof TimelineDetailV2RequestSchema.infer;
+const TimelineDetailIconSchema = type({
+  asset: "string",
+  badge: "null",
+}).or("string");
+const TimelineDetailDocumentActionSchema = type({
+  payload: "string",
+  type: "'browserModal'",
+}).or({
+  payload: { path: "string", shareable: "boolean", title: "string" },
+  type: "'authenticatedBrowserModal'",
+});
 const TimelineDetailSectionSchema = type
   .or(
     type({
       title: "string",
-      data: { "icon?": "string", timestamp: "string", status: "string" },
+      data: { "icon?": TimelineDetailIconSchema, timestamp: "string", status: "string" },
       type: "'header'",
     }),
     type({ title: "string", description: "string", type: "'banner'" }),
     type({
-      title: "string",
+      "title?": "string",
       data: type({ title: "string", detail: "unknown", style: "string" }).array(),
       type: "'table'",
     }),
@@ -190,7 +201,7 @@ const TimelineDetailSectionSchema = type
       title: "string",
       data: type({
         title: "string",
-        action: { payload: "string", type: "'browserModal'" },
+        action: TimelineDetailDocumentActionSchema,
         id: "string",
         postboxType: "string",
       }).array(),
