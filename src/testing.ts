@@ -33,7 +33,7 @@ export class FakeClock implements Clock {
   }
 
   clearTimeout(handle: TimerHandle): void {
-    if (typeof handle === "number") this.#timers.delete(handle);
+    this.#timers.delete(Number(handle));
   }
 
   setInterval(callback: () => void, intervalMs: number): TimerHandle {
@@ -41,7 +41,7 @@ export class FakeClock implements Clock {
   }
 
   clearInterval(handle: TimerHandle): void {
-    if (typeof handle === "number") this.#timers.delete(handle);
+    this.#timers.delete(Number(handle));
   }
 
   advanceBy(durationMs: number): void {

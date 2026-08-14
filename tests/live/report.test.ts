@@ -104,4 +104,20 @@ describe("live account audit report", () => {
     ]);
     expect(lines.join("\n")).not.toContain(privateValue);
   });
+
+  test("reports only safe TRAccount slice summaries", () => {
+    const lines: string[] = [];
+    const report = createLiveReport((line) => lines.push(line));
+
+    report.accountSlice("transactions", {
+      freshness: "fresh",
+      items: 2,
+      from: "2026-01-01T00:00:00.000Z",
+      to: "2026-01-08T00:00:00.000Z",
+    });
+
+    expect(lines).toEqual([
+      "TRAccount.transactions: fresh (2 items) (2026-01-01T00:00:00.000Z to 2026-01-08T00:00:00.000Z)",
+    ]);
+  });
 });

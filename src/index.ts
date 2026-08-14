@@ -17,6 +17,22 @@ export {
   type TopicAccessor,
   type TRClientOptions,
 } from "./client.ts";
+export {
+  TRAccount,
+  type AccountCash,
+  type AccountCashBalance,
+  type AccountDocument,
+  type AccountSlice,
+  type Freshness,
+  type MaterializedRange,
+  type Money,
+  type SliceSnapshot,
+  type Transaction,
+  type TransactionRange,
+  type TransactionSlice,
+  type TransactionSnapshot,
+  type TRAccountOptions,
+} from "./account.ts";
 export { type LoginOptions, type SessionValidity } from "./session.ts";
 export { applyDelta } from "./protocol.ts";
 export {

@@ -1,21 +1,26 @@
 import { afterEach, describe, expect, test, vi } from "vite-plus/test";
 import { decodeBase64 } from "../src/encoding.ts";
-import { resolveEnvironment } from "../src/environment.ts";
+import { resolveEnvironment, type SocketOptions } from "../src/environment.ts";
 import { TRClient, TRValidationError } from "../src/index.ts";
 import { FakeClock } from "../src/testing.ts";
 
 interface SocketConstructorCall {
   readonly url: string;
-  readonly second?: string | string[] | object;
-  readonly third?: object;
+  readonly second?: string | string[] | RuntimeSocketOptions;
+  readonly third?: SocketOptions;
+}
+
+interface RuntimeSocketOptions extends SocketOptions {
+  readonly protocols?: string | string[];
 }
 
 function recordingWebSocket(calls: SocketConstructorCall[]): typeof WebSocket {
-  return class {
-    constructor(url: string, second?: string | string[] | object, third?: object) {
-      calls.push({ url, second, third });
-    }
-  } as unknown as typeof WebSocket;
+  return new Proxy(WebSocket, {
+    construct(_target, [url, second, third]) {
+      calls.push({ url: String(url), second, third });
+      return Object.create(WebSocket.prototype);
+    },
+  });
 }
 
 afterEach(() => vi.unstubAllGlobals());

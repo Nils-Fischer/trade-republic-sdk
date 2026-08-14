@@ -6,6 +6,7 @@ import {
   type TimelineTransactionsResponse,
 } from "../../src/index.ts";
 import type { AccessorCounts, LiveReport } from "./report.ts";
+import { auditTRAccount } from "./tr-account-audit.ts";
 
 const READ_TIMEOUT_MS = 30_000;
 const MAX_TIMELINE_PAGES = 1_000;
@@ -148,6 +149,9 @@ export class LiveAccountAudit {
     } else {
       this.#report.skipped("namedWatchlist", "watchlists-unavailable");
     }
+
+    this.#activeAccessor = "TRAccount.sync";
+    await auditTRAccount(client, this.#report);
 
     return this.#restoreAndRead(client);
   }

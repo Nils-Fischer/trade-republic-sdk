@@ -71,9 +71,25 @@ type NamedResourceAccessors = {
   readonly [Name in ResourceName]: ResourceAccessor<ResourceResponse<Name>>;
 };
 
+interface AccountClientInternals {
+  now(): number;
+  subscriptionCount(): number;
+  watch<Name extends TopicName>(
+    name: Name,
+    request: TopicRequest<Name>,
+    signal: AbortSignal,
+    onSubscribed: () => void,
+  ): AsyncIterable<TopicResponse<Name>>;
+}
+
+const accountClientInternals = new WeakMap<TRClient, AccountClientInternals>();
+
 const DEFAULT_TIMELINE_PAGE_TIMEOUT_MS = 15_000;
 
-const duplicateAccessorName = resourceNames.find((name) => topicNames.includes(name as TopicName));
+const duplicateAccessorName = resourceNames.find((name) => {
+  // SAFETY: Registry collision detection must compare keys from otherwise disjoint unions.
+  return topicNames.includes(name as TopicName);
+});
 if (duplicateAccessorName) {
   throw new Error(`Duplicate TRClient accessor name "${duplicateAccessorName}"`);
 }
@@ -86,6 +102,7 @@ export class TRClient {
   readonly #connection: Connection;
   readonly #responseValidation: ResponseValidation;
   #connectionUpdate: Promise<void> | undefined;
+  #subscriptionCount = 0;
 
   constructor(options: TRClientOptions = {}) {
     this.#environment = resolveEnvironment(options);
@@ -95,6 +112,12 @@ export class TRClient {
       mode: options.validate ?? "warn",
       warn: options.onValidationWarning ?? ((warning) => console.warn(warning)),
     };
+    accountClientInternals.set(this, {
+      now: () => this.#environment.clock.now(),
+      subscriptionCount: () => this.#subscriptionCount,
+      watch: (name, request, signal, onSubscribed) =>
+        this.#watch(name, request, signal, onSubscribed),
+    });
     topicNames.forEach((name) => {
       Object.defineProperty(this, name, {
         enumerable: true,
@@ -207,7 +230,7 @@ export class TRClient {
         pageOldest = timestamp;
 
         if (timestamp < from) crossedFrom = true;
-        if (timestamp >= from && timestamp < to && !transactions.has(transaction.id)) {
+        if (timestamp >= from && timestamp < to) {
           transactions.set(transaction.id, transaction);
         }
       }
@@ -318,6 +341,7 @@ export class TRClient {
           },
           "fail",
         );
+        this.#subscriptionCount += 1;
       };
 
       void this.#connect().then(subscribe).catch(fail);
@@ -327,6 +351,8 @@ export class TRClient {
   async *#watch<Name extends TopicName>(
     name: Name,
     request: TopicRequest<Name>,
+    signal?: AbortSignal,
+    onSubscribed?: () => void,
   ): AsyncIterableIterator<TopicResponse<Name>> {
     if (isSecuredTopic(name) && this.#session.validity !== "presumed-valid") {
       throw new TRAuthError(`Topic "${name}" requires a Session`);
@@ -336,7 +362,7 @@ export class TRClient {
 
     for (;;) {
       try {
-        yield* this.#watchSubscription(name, payload);
+        yield* this.#watchSubscription(name, payload, signal, onSubscribed);
         return;
       } catch (error) {
         if (!(error instanceof Error) || !this.#isAuthenticationError(error)) throw error;
@@ -347,16 +373,50 @@ export class TRClient {
     }
   }
 
-  async *#watchSubscription<Name extends TopicName>(
+  async *#watchSubscription<Name extends TopicName, Payload>(
     name: Name,
-    payload: object,
+    payload: Payload,
+    signal?: AbortSignal,
+    onSubscribed?: () => void,
   ): AsyncIterableIterator<TopicResponse<Name>> {
     let latest: TopicResponse<Name> | undefined;
     let failure: Error | undefined;
     let wake: (() => void) | undefined;
+    let rejectConnection: ((error: Error) => void) | undefined;
+    let subscription: SubscriptionControl | undefined;
 
-    await this.#connect();
-    const subscription = this.#connection.subscribe(
+    const abort = (): void => {
+      failure = new TRAbortError(`Watch for Topic "${name}" was aborted`, {
+        cause: signal?.reason,
+      });
+      subscription?.unsubscribe();
+      rejectConnection?.(failure);
+      wake?.();
+      wake = undefined;
+    };
+
+    if (signal) {
+      if (signal.aborted) abort();
+      else signal.addEventListener("abort", abort, { once: true });
+      if (failure) throw failure;
+      try {
+        await new Promise<void>((resolve, reject) => {
+          rejectConnection = reject;
+          void this.#connect().then(resolve, reject);
+        });
+      } catch (error) {
+        signal.removeEventListener("abort", abort);
+        throw error;
+      }
+      rejectConnection = undefined;
+      if (failure) {
+        signal.removeEventListener("abort", abort);
+        throw failure;
+      }
+    } else {
+      await this.#connect();
+    }
+    subscription = this.#connection.subscribe(
       payload,
       (rawPayload) => decodeTopicResponse(name, rawPayload, this.#responseValidation),
       {
@@ -376,6 +436,8 @@ export class TRClient {
       },
       "resume",
     );
+    this.#subscriptionCount += 1;
+    onSubscribed?.();
 
     try {
       for (;;) {
@@ -391,6 +453,7 @@ export class TRClient {
         });
       }
     } finally {
+      signal?.removeEventListener("abort", abort);
       subscription.unsubscribe();
     }
   }
@@ -430,3 +493,30 @@ function newestFirst(
 }
 
 export interface TRClient extends NamedTopicAccessors, NamedResourceAccessors {}
+
+/** @internal Account projection clock seam. */
+export function accountClientNow(client: TRClient): number {
+  return accountInternalsFor(client).now();
+}
+
+/** @internal Live account audit seam. */
+export function accountClientSubscriptionCount(client: TRClient): number {
+  return accountInternalsFor(client).subscriptionCount();
+}
+
+/** @internal Account projection Watch seam. */
+export function accountClientWatch<Name extends TopicName>(
+  client: TRClient,
+  name: Name,
+  request: TopicRequest<Name>,
+  signal: AbortSignal,
+  onSubscribed: () => void,
+): AsyncIterable<TopicResponse<Name>> {
+  return accountInternalsFor(client).watch(name, request, signal, onSubscribed);
+}
+
+function accountInternalsFor(client: TRClient): AccountClientInternals {
+  const internals = accountClientInternals.get(client);
+  if (!internals) throw new TRValidationError("TRAccount requires a TRClient instance");
+  return internals;
+}

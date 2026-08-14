@@ -32,7 +32,7 @@ function ticker(price: string, time = 1): TickerResponse {
   };
 }
 
-function snapshotFrame(requestId: number, value: unknown): string {
+function snapshotFrame<Value>(requestId: number, value: Value): string {
   return `${requestId} A ${JSON.stringify(value)}`;
 }
 

@@ -13,7 +13,7 @@ import { FakeClock, FakeSocket } from "../src/testing.ts";
 
 const startTime = 1_000_000;
 
-function base64Url(value: object): string {
+function base64Url<Value>(value: Value): string {
   return btoa(JSON.stringify(value)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
 }
 
@@ -21,7 +21,7 @@ function jwt(iat: number, exp: number): string {
   return `${base64Url({ alg: "ES256" })}.${base64Url({ iat, exp })}.signature`;
 }
 
-function ticker(price: string): object {
+function ticker(price: string) {
   const quote = { time: 1, price, size: 10 };
   return {
     bid: quote,
@@ -35,8 +35,8 @@ function ticker(price: string): object {
   };
 }
 
-function response(
-  body: object | undefined,
+function response<Body>(
+  body: Body | undefined,
   cookies: readonly string[] = [],
   status = 200,
 ): Response {
@@ -48,11 +48,11 @@ function response(
 }
 
 function mockFetch(responses: Array<Response | Promise<Response>>): Fetch {
-  return vi.fn(async () => {
+  return vi.fn<Fetch>(async () => {
     const next = responses.shift();
     if (!next) throw new Error("Unexpected HTTP request");
     return next;
-  }) as Fetch;
+  });
 }
 
 function subscriptionIds(socket: FakeSocket): number[] {
@@ -171,8 +171,7 @@ describe("Session", () => {
     expect(options?.headers).toMatchObject({
       Cookie: expect.stringContaining("tr_refresh="),
     });
-    const headers = options?.headers as Record<string, string> | undefined;
-    expect(headers?.Cookie).toContain("mapper-lb-affinity=mapper");
+    expect(new Headers(options?.headers).get("Cookie")).toContain("mapper-lb-affinity=mapper");
   });
 
   test("retries failed proactive Refreshes with bounded exponential backoff", async () => {
@@ -693,10 +692,12 @@ describe("Session", () => {
 
     const clock = new FakeClock(startTime);
     const timedOut = new TRClient({
-      fetch: (async (_input, init) =>
-        new Promise<Response>((_resolve, reject) => {
-          init?.signal?.addEventListener("abort", () => reject(init.signal?.reason));
-        })) as Fetch,
+      fetch: vi.fn<Fetch>(
+        (_input, init) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+          }),
+      ),
       clock,
     }).login("+49123456789", "1234", { timeoutMs: 100, pollIntervalMs: 100 });
     clock.advanceBy(100);
@@ -704,10 +705,12 @@ describe("Session", () => {
 
     const controller = new AbortController();
     const aborted = new TRClient({
-      fetch: (async (_input, init) =>
-        new Promise<Response>((_resolve, reject) => {
-          init?.signal?.addEventListener("abort", () => reject(init.signal?.reason));
-        })) as Fetch,
+      fetch: vi.fn<Fetch>(
+        (_input, init) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+          }),
+      ),
     }).login("+49123456789", "1234", { signal: controller.signal });
     controller.abort("stop");
     await expect(aborted).rejects.toBeInstanceOf(TRAbortError);

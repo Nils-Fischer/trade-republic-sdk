@@ -79,9 +79,11 @@ const stableDeviceId =
   Math.random().toString(16).slice(2).padEnd(32, "0").slice(0, 32);
 
 function createDeviceInfo(): string {
+  // SAFETY: deviceMemory is a Chromium extension and may be absent in other runtimes.
   const runtimeNavigator = globalThis.navigator as
     | (Navigator & { deviceMemory?: number })
     | undefined;
+  // SAFETY: screen is absent outside browser-like runtimes.
   const runtimeScreen = (
     globalThis as typeof globalThis & {
       screen?: { width: number; height: number; colorDepth: number };
@@ -108,23 +110,14 @@ function createDeviceInfo(): string {
   );
 }
 
-interface ReactNativeSocketConstructor {
-  new (url: string, protocols?: string | string[], options?: SocketOptions): Socket;
-}
-
-interface NodeSocketConstructor {
-  new (url: string, options: SocketOptions & { protocols?: string | string[] }): Socket;
-}
-
 function isReactNative(): boolean {
-  return (
-    typeof navigator !== "undefined" &&
-    (navigator as Navigator & { product?: string }).product === "ReactNative"
-  );
+  // SAFETY: React Native adds product to its Navigator implementation.
+  const runtimeNavigator = globalThis.navigator as (Navigator & { product?: string }) | undefined;
+  return runtimeNavigator?.product === "ReactNative";
 }
 
 function isNode(): boolean {
-  return typeof process !== "undefined" && process.versions?.node !== undefined;
+  return globalThis.process?.versions.node !== undefined;
 }
 
 const realSocket: SocketFactory = (url, protocols, options) => {
@@ -136,15 +129,14 @@ const realSocket: SocketFactory = (url, protocols, options) => {
   }
 
   if (isReactNative()) {
-    return new (NativeSocket as unknown as ReactNativeSocketConstructor)(url, protocols, options);
+    return Reflect.construct(NativeSocket, [url, protocols, options]);
   }
   if (isNode() && options) {
-    return new (NativeSocket as unknown as NodeSocketConstructor)(url, {
-      ...options,
-      ...(protocols === undefined ? {} : { protocols }),
-    });
+    const nodeOptions: SocketOptions & { protocols?: string | string[] } = { ...options };
+    if (protocols !== undefined) nodeOptions.protocols = protocols;
+    return Reflect.construct(NativeSocket, [url, nodeOptions]);
   }
-  return new NativeSocket(url, protocols) as Socket;
+  return new NativeSocket(url, protocols);
 };
 
 /** @internal Resolve omitted environment values to their real runtime implementations. */

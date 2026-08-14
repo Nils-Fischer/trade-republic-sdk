@@ -32,6 +32,7 @@
     "dev": "vp pack --watch",
     "test": "vp test",
     "test:live": "bun tests/live/account.ts",
+    "test:live:tr-account": "bun tests/live/tr-account.ts",
     "check": "vp check",
     "prepublishOnly": "vp run build",
     "prepare": "vp config"

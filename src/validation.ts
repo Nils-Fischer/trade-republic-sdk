@@ -8,23 +8,30 @@ export interface ResponseValidation {
   warn(error: TRValidationError): void;
 }
 
-interface ResponseSchema {
-  (value: unknown): unknown;
+interface ResponseSchema<Input, Output> {
+  (value: Input): Output | type.errors;
 }
 
-export function validateResponse<Response>(
-  schema: ResponseSchema,
-  value: unknown,
+function uncheckedResponse<Response, Input>(value: Input): Response {
+  // SAFETY: The caller explicitly selected a validation mode that permits invalid responses.
+  return value as Input & Response;
+}
+
+export function validateResponse<Response, Input = unknown>(
+  schema: ResponseSchema<Input, Response>,
+  value: Input,
   subject: string,
   validation: ResponseValidation,
 ): Response {
-  if (validation.mode === "off") return value as Response;
+  if (validation.mode === "off") {
+    return uncheckedResponse<Response, Input>(value);
+  }
 
   const result = schema(value);
-  if (!(result instanceof type.errors)) return result as Response;
+  if (!(result instanceof type.errors)) return result;
 
   const error = new TRValidationError(`Invalid response for ${subject}`, { cause: result });
   if (validation.mode === "throw") throw error;
   validation.warn(error);
-  return value as Response;
+  return uncheckedResponse<Response, Input>(value);
 }

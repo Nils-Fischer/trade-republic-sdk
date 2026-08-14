@@ -27,10 +27,18 @@ export interface AccessorCounts {
   readonly items?: number;
 }
 
+export interface AccountSliceSummary {
+  readonly freshness: "empty" | "fresh" | "stale";
+  readonly items?: number;
+  readonly from?: string;
+  readonly to?: string;
+}
+
 export interface LiveReport {
   capture(accessor: string, warning: TRValidationError): void;
   accessor(accessor: string, counts?: AccessorCounts): void;
   failure(accessor: string, error: Error): void;
+  accountSlice(slice: string, summary: AccountSliceSummary): void;
   skipped(accessor: string, reason: string): void;
   finish(): boolean;
 }
@@ -69,6 +77,13 @@ export function createLiveReport(write: (line: string) => void): LiveReport {
     write(JSON.stringify({ accessor: accessorName, code: reason }));
   };
 
+  const accountSlice = (slice: string, summary: AccountSliceSummary): void => {
+    const counts =
+      summary.items === undefined ? "" : ` (${summary.items} ${plural(summary.items, "item")})`;
+    const range = summary.from && summary.to ? ` (${summary.from} to ${summary.to})` : "";
+    write(`TRAccount.${slice}: ${summary.freshness}${counts}${range}`);
+  };
+
   const finish = (): boolean => {
     const issueAccessors = [...issues.entries()].filter(([, current]) => current.size > 0);
     const issueCount = issueAccessors.reduce((sum, [, current]) => sum + current.size, 0);
@@ -88,7 +103,7 @@ export function createLiveReport(write: (line: string) => void): LiveReport {
     return true;
   };
 
-  return { capture, accessor, failure, skipped, finish };
+  return { capture, accessor, failure, accountSlice, skipped, finish };
 }
 
 function writeIssues(

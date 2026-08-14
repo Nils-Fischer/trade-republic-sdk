@@ -8,6 +8,7 @@ import {
   TRTimeoutError,
   TRValidationError,
 } from "./errors.ts";
+import { parseJson } from "./json.ts";
 
 const API_URL = "https://api.traderepublic.com";
 const LOGIN_PATH = "/api/v2/auth/web/login";
@@ -124,6 +125,7 @@ function splitCombinedCookies(header: string): string[] {
 }
 
 function responseCookies(response: Response): string[] {
+  // SAFETY: getSetCookie is an optional Fetch extension implemented by some runtimes.
   const getSetCookie = (response.headers as { getSetCookie?: () => string[] }).getSetCookie;
   const separate = getSetCookie?.call(response.headers) ?? [];
   if (separate.length > 0) return separate;
@@ -132,13 +134,15 @@ function responseCookies(response: Response): string[] {
   return combined ? splitCombinedCookies(combined) : [];
 }
 
-async function parseJson(response: Response): Promise<unknown> {
-  return response.json().catch((cause: unknown) => {
-    throw new TRValidationError("Trade Republic returned invalid JSON", { cause });
-  });
+interface AssertiveSchema<Input, Value> {
+  assert(value: Input): Value;
 }
 
-function validate<Value>(schema: { assert(value: unknown): Value }, value: unknown, name: string) {
+function validate<Input, Value>(
+  schema: AssertiveSchema<Input, Value>,
+  value: Input,
+  name: string,
+): Value {
   try {
     return schema.assert(value);
   } catch (cause) {
@@ -155,7 +159,10 @@ function decodeClaims(cookie: string): typeof jwtClaimsSchema.infer {
       .replaceAll("-", "+")
       .replaceAll("_", "/")
       .padEnd(Math.ceil(payload.length / 4) * 4, "=");
-    const claims = jwtClaimsSchema.assert(JSON.parse(decodeBase64(base64)));
+    const claims = parseJson(decodeBase64(base64), (value) => jwtClaimsSchema.assert(value), {
+      onInvalidJson: "throw",
+      errorMessage: "The tr_session cookie has invalid JSON claims",
+    });
     if (claims.exp <= claims.iat) throw new Error("The JWT lifetime is not positive");
     return claims;
   } catch (cause) {
@@ -214,7 +221,7 @@ export function createSession(environment: ResolvedEnvironment, serialized?: str
   };
 
   const request = async (options: RequestOptions): Promise<Response> => {
-    const headers: Record<string, string> = {
+    const baseHeaders = {
       Accept: "application/json, text/plain, */*",
       "Accept-Language": "en",
       "Content-Type": "application/json",
@@ -223,7 +230,7 @@ export function createSession(environment: ResolvedEnvironment, serialized?: str
       "X-TR-Platform": "web-pro",
     };
     const cookie = options.cookies?.map(cookiePair).filter(Boolean).join("; ");
-    if (cookie) headers.Cookie = cookie;
+    const headers = cookie ? { ...baseHeaders, Cookie: cookie } : baseHeaders;
 
     let response: Response;
     try {
@@ -422,7 +429,11 @@ export function createSession(environment: ResolvedEnvironment, serialized?: str
       cookies,
       signal,
     });
-    const loginResponse = validate(loginResponseSchema, await parseJson(initial), "Login response");
+    const loginResponse = await parseJson(
+      initial,
+      (value) => validate(loginResponseSchema, value, "Login response"),
+      { onInvalidJson: "throw", errorMessage: "Trade Republic returned invalid JSON" },
+    );
     let receivedLoginCookies = responseCookies(initial);
     let pendingCookies = mergeCookies(cookies, receivedLoginCookies);
 
@@ -436,7 +447,11 @@ export function createSession(environment: ResolvedEnvironment, serialized?: str
       const received = responseCookies(response);
       receivedLoginCookies = mergeCookies(receivedLoginCookies, received);
       pendingCookies = mergeCookies(pendingCookies, received);
-      const status = validate(loginStatusSchema, await parseJson(response), "Login status");
+      const status = await parseJson(
+        response,
+        (value) => validate(loginStatusSchema, value, "Login status"),
+        { onInvalidJson: "throw", errorMessage: "Trade Republic returned invalid JSON" },
+      );
 
       if (status.status === "CONFIRMED") {
         if (
@@ -506,13 +521,11 @@ export function createSession(environment: ResolvedEnvironment, serialized?: str
   };
 
   const restore = (value: string): void => {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(value);
-    } catch (cause) {
-      throw new TRValidationError("Invalid exported Session", { cause });
-    }
-    const data = validate(sessionDataSchema, parsed, "exported Session");
+    const data = parseJson(
+      value,
+      (parsed) => validate(sessionDataSchema, parsed, "exported Session"),
+      { onInvalidJson: "throw", errorMessage: "Invalid exported Session" },
+    );
     const names = data.cookies.map(cookieName);
     if (new Set(names).size !== names.length) {
       throw new TRValidationError("The exported Session has duplicate cookie names");

@@ -1,5 +1,6 @@
 import { type } from "arktype";
 import { TRValidationError } from "./errors.ts";
+import { parseJson } from "./json.ts";
 import { validateResponse, type ResponseValidation } from "./validation.ts";
 
 export type { ValidationMode } from "./validation.ts";
@@ -432,6 +433,7 @@ function assertTopicRequest<Name extends TopicName>(
   request: TopicRequest<Name>,
 ): TopicRequest<Name> {
   try {
+    // SAFETY: The registry key and request type share the same generic Topic name.
     return topicRegistry[name].request.assert(request) as TopicRequest<Name>;
   } catch (cause) {
     throw new TRValidationError(`Invalid request for Topic "${name}"`, { cause });
@@ -453,17 +455,13 @@ export function decodeTopicResponse<Name extends TopicName>(
   payload: string,
   validation: ResponseValidation,
 ): TopicResponse<Name> | undefined {
-  let value: unknown;
-  try {
-    value = JSON.parse(payload);
-  } catch {
-    // A malformed Frame is ignored in every validation mode.
-    return undefined;
-  }
+  const parsed = parseJson(payload, (value) => ({ value }), { onInvalidJson: "ignore" });
+  // A malformed Frame is ignored in every validation mode.
+  if (!parsed) return undefined;
 
   return validateResponse<TopicResponse<Name>>(
     topicRegistry[name].response,
-    value,
+    parsed.value,
     `Topic "${name}"`,
     validation,
   );

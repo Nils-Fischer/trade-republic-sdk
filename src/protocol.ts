@@ -1,5 +1,6 @@
 import { type } from "arktype";
 import { TRTopicError, TRValidationError } from "./errors.ts";
+import { parseJson } from "./json.ts";
 
 const topicErrorEnvelopeSchema = type({
   errors: type({
@@ -78,19 +79,18 @@ export function parseFrame(raw: string): ProtocolFrame | undefined {
 }
 
 function parseTopicError(payload: string): TRTopicError | undefined {
-  let value: unknown;
-  try {
-    value = JSON.parse(payload);
-  } catch {
-    return undefined;
-  }
+  return parseJson(
+    payload,
+    (value) => {
+      const envelope = topicErrorEnvelopeSchema(value);
+      if (envelope instanceof type.errors || envelope.errors.length === 0) return undefined;
 
-  const envelope = topicErrorEnvelopeSchema(value);
-  if (envelope instanceof type.errors || envelope.errors.length === 0) return undefined;
-
-  const first = envelope.errors[0]!;
-  return new TRTopicError(
-    first.errorCode,
-    first.errorMessage ?? "Trade Republic rejected the Topic",
+      const first = envelope.errors[0]!;
+      return new TRTopicError(
+        first.errorCode,
+        first.errorMessage ?? "Trade Republic rejected the Topic",
+      );
+    },
+    { onInvalidJson: "ignore" },
   );
 }

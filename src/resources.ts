@@ -1,5 +1,5 @@
 import { type } from "arktype";
-import { TRValidationError } from "./errors.ts";
+import { parseJson } from "./json.ts";
 import { validateResponse, type ResponseValidation } from "./validation.ts";
 
 const NameSchema = type({ first: "string", last: "string" });
@@ -251,16 +251,18 @@ export async function decodeResourceResponse<Name extends ResourceName>(
   response: Response,
   validation: ResponseValidation,
 ): Promise<ResourceResponse<Name>> {
-  let value: unknown;
-  try {
-    value = await response.json();
-  } catch (cause) {
-    throw new TRValidationError(`Invalid JSON for Resource "${name}"`, { cause });
-  }
-  return validateResponse<ResourceResponse<Name>>(
-    resourceRegistry[name].response,
-    value,
-    `Resource "${name}"`,
-    validation,
+  return parseJson(
+    response,
+    (value) =>
+      validateResponse<ResourceResponse<Name>>(
+        resourceRegistry[name].response,
+        value,
+        `Resource "${name}"`,
+        validation,
+      ),
+    {
+      onInvalidJson: "throw",
+      errorMessage: `Invalid JSON for Resource "${name}"`,
+    },
   );
 }

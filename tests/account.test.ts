@@ -27,7 +27,7 @@ const taxInformation: TaxInformation = {
   lossSetOffWithholdingTax: 6,
 };
 
-function accountInfoWithAddressAddendum(): object {
+function accountInfoWithAddressAddendum() {
   const experience = { tradeCount: 0, level: "NONE", showsRiskWarning: false };
   const account = { iban: "DE00000000000000000000", bic: null };
   const enhancedAccount = { ...account, bankName: "Example Bank", logoUrl: null };
@@ -86,7 +86,7 @@ function accountInfoWithAddressAddendum(): object {
   };
 }
 
-function base64Url(value: object): string {
+function base64Url<Value>(value: Value): string {
   return btoa(JSON.stringify(value)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
 }
 
@@ -105,14 +105,14 @@ function savedSession(): string {
   });
 }
 
-function response(body: unknown, status = 200, cookies: readonly string[] = []): Response {
+function response<Body>(body: Body, status = 200, cookies: readonly string[] = []): Response {
   const headers: [string, string][] = cookies.map((cookie) => ["set-cookie", cookie]);
   headers.push(["content-type", "application/json"]);
   return new Response(JSON.stringify(body), { status, headers });
 }
 
 function requestUrl(input: string | URL | Request): string {
-  return typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  return new Request(input).url;
 }
 
 function transaction(id: string, timestamp: string): TimelineTransaction {
@@ -134,7 +134,7 @@ function transaction(id: string, timestamp: string): TimelineTransaction {
   };
 }
 
-function snapshot(requestId: number, value: unknown): string {
+function snapshot<Value>(requestId: number, value: Value): string {
   return `${requestId} A ${JSON.stringify(value)}`;
 }
 
@@ -143,7 +143,7 @@ function subscriptions(socket: FakeSocket): Array<{ id: number; payload: unknown
     .filter((line) => line.startsWith("sub "))
     .map((line) => {
       const [, id, payload] = line.split(" ", 3);
-      return { id: Number(id), payload: JSON.parse(payload!) as unknown };
+      return { id: Number(id), payload: JSON.parse(payload!) };
     });
 }
 
@@ -168,7 +168,7 @@ function authenticatedClient(options: ConstructorParameters<typeof TRClient>[0] 
 
 describe("account resources", () => {
   test("derives typed Get-only accessors from the resource registry", () => {
-    const client = authenticatedClient({ fetch: vi.fn() as Fetch });
+    const client = authenticatedClient({ fetch: vi.fn<Fetch>() });
 
     resourceNames.forEach((name) => {
       expect(client[name]).toEqual({ get: expect.any(Function) });
@@ -176,11 +176,12 @@ describe("account resources", () => {
     });
     expectTypeOf(client.accountInfo).toEqualTypeOf<ResourceAccessor<AccountInfo>>();
     expectTypeOf<{ unexpected: true }>().not.toExtend<TopicRequest<"accountPairs">>();
+    // SAFETY: This deliberately invalid request verifies the runtime validation boundary.
     expect(() => client.accountPairs.get({ unexpected: true } as never)).toThrow(TRValidationError);
   });
 
   test("fails secured HTTP and Topic reads locally when the Session is absent", async () => {
-    const fetch = vi.fn() as Fetch;
+    const fetch = vi.fn<Fetch>();
     const socket = vi.fn(() => new FakeSocket());
     const client = new TRClient({ fetch, socket });
 
@@ -191,7 +192,7 @@ describe("account resources", () => {
   });
 
   test("sends the method, path, shared headers, and Session cookie pairs", async () => {
-    const fetch = vi.fn(async () => response(taxInformation)) as Fetch;
+    const fetch = vi.fn<Fetch>(async () => response(taxInformation));
     const client = authenticatedClient({ fetch });
 
     await expect(client.taxInformation.get()).resolves.toEqual(taxInformation);
@@ -212,7 +213,7 @@ describe("account resources", () => {
   test("accepts the observed optional postal address addendum", async () => {
     const accountInfo = accountInfoWithAddressAddendum();
     const client = authenticatedClient({
-      fetch: vi.fn(async () => response(accountInfo)) as Fetch,
+      fetch: vi.fn<Fetch>(async () => response(accountInfo)),
     });
 
     await expect(client.accountInfo.get()).resolves.toEqual(accountInfo);
@@ -232,7 +233,7 @@ describe("account resources", () => {
       ],
     };
     const client = authenticatedClient({
-      fetch: vi.fn(async () => response(allDocuments)) as Fetch,
+      fetch: vi.fn<Fetch>(async () => response(allDocuments)),
     });
 
     await expect(client.allDocuments.get()).resolves.toEqual(allDocuments);
@@ -242,18 +243,18 @@ describe("account resources", () => {
     const changed = { ...taxInformation, serverAddition: true };
     const warnings: TRValidationError[] = [];
     const warn = authenticatedClient({
-      fetch: vi.fn(async () => response(changed)) as Fetch,
+      fetch: vi.fn<Fetch>(async () => response(changed)),
       validate: "warn",
       onValidationWarning: (warning) => warnings.push(warning),
     });
     await expect(warn.taxInformation.get()).resolves.toEqual(changed);
     expect(warnings[0]?.message).toContain('Resource "taxInformation"');
 
-    const strict = authenticatedClient({ fetch: vi.fn(async () => response(changed)) as Fetch });
+    const strict = authenticatedClient({ fetch: vi.fn<Fetch>(async () => response(changed)) });
     await expect(strict.taxInformation.get()).rejects.toBeInstanceOf(TRValidationError);
 
     const off = authenticatedClient({
-      fetch: vi.fn(async () => response(changed)) as Fetch,
+      fetch: vi.fn<Fetch>(async () => response(changed)),
       validate: "off",
       onValidationWarning: () => {
         throw new Error("Validation must be off");
@@ -269,7 +270,7 @@ describe("account resources", () => {
     });
     let resourceReads = 0;
     let refreshes = 0;
-    const fetch = vi.fn(async (input: string | URL | Request) => {
+    const fetch = vi.fn<Fetch>(async (input) => {
       const url = requestUrl(input);
       if (url.endsWith("/api/v1/auth/web/session")) {
         refreshes += 1;
@@ -277,7 +278,7 @@ describe("account resources", () => {
       }
       resourceReads += 1;
       return resourceReads <= 2 ? response({}, 401) : response(taxInformation);
-    }) as Fetch;
+    });
     const client = authenticatedClient({ fetch });
 
     const first = client.taxInformation.get();
@@ -291,11 +292,11 @@ describe("account resources", () => {
   });
 
   test("retries authentication once, then marks the Session rejected", async () => {
-    const fetch = vi.fn(async (input: string | URL | Request) =>
+    const fetch = vi.fn<Fetch>(async (input) =>
       requestUrl(input).endsWith("/api/v1/auth/web/session")
         ? response(undefined, 200, [`tr_session=${jwt(1_240, 1_540)}; Path=/; Secure`])
         : response({}, 403),
-    ) as Fetch;
+    );
     const client = authenticatedClient({ fetch });
 
     await expect(client.taxInformation.get()).rejects.toBeInstanceOf(TRAuthError);
@@ -310,11 +311,11 @@ describe("account resources", () => {
     });
     const clock = new FakeClock(startTime);
     let resourceReads = 0;
-    const fetch = vi.fn(async (input: string | URL | Request) => {
+    const fetch = vi.fn<Fetch>(async (input) => {
       if (requestUrl(input).endsWith("/api/v1/auth/web/session")) return pendingRefresh;
       resourceReads += 1;
       return response({}, 401);
-    }) as Fetch;
+    });
     const client = authenticatedClient({ clock, fetch });
     const result = client.taxInformation.get({ timeoutMs: 10 });
     await flush();
@@ -330,7 +331,7 @@ describe("account resources", () => {
   test("keeps HTTP and Topic reads independent", async () => {
     const socket = new FakeSocket();
     const client = authenticatedClient({
-      fetch: vi.fn(async () => response(taxInformation)) as Fetch,
+      fetch: vi.fn<Fetch>(async () => response(taxInformation)),
       socket: () => socket,
     });
     const rest = client.taxInformation.get();
@@ -515,22 +516,22 @@ describe("account resources", () => {
   });
 
   test("keeps HTTP errors, invalid JSON, cancellation, and timeout distinct", async () => {
-    const http = authenticatedClient({ fetch: vi.fn(async () => response({}, 500)) as Fetch });
+    const http = authenticatedClient({ fetch: vi.fn<Fetch>(async () => response({}, 500)) });
     await expect(http.taxInformation.get()).rejects.toBeInstanceOf(TRHttpError);
 
     const invalid = authenticatedClient({
-      fetch: vi.fn(async () => new Response("not-json")) as Fetch,
+      fetch: vi.fn<Fetch>(async () => new Response("not-json")),
     });
     await expect(invalid.taxInformation.get()).rejects.toBeInstanceOf(TRValidationError);
 
     const controller = new AbortController();
     const aborted = authenticatedClient({
-      fetch: vi.fn(
+      fetch: vi.fn<Fetch>(
         (_input, options) =>
           new Promise<Response>((_resolve, reject) => {
             options?.signal?.addEventListener("abort", () => reject(options.signal?.reason));
           }),
-      ) as Fetch,
+      ),
     }).taxInformation.get({ signal: controller.signal });
     controller.abort("stop");
     await expect(aborted).rejects.toBeInstanceOf(TRAbortError);
@@ -538,12 +539,12 @@ describe("account resources", () => {
     const clock = new FakeClock(startTime);
     const timedOut = authenticatedClient({
       clock,
-      fetch: vi.fn(
+      fetch: vi.fn<Fetch>(
         (_input, options) =>
           new Promise<Response>((_resolve, reject) => {
             options?.signal?.addEventListener("abort", () => reject(options.signal?.reason));
           }),
-      ) as Fetch,
+      ),
     }).taxInformation.get({ timeoutMs: 10 });
     clock.advanceBy(10);
     await expect(timedOut).rejects.toBeInstanceOf(TRTimeoutError);

@@ -30,7 +30,7 @@ export interface SubscriptionControl {
 }
 
 interface ActiveSubscription {
-  readonly payload: object;
+  readonly serializedPayload: string;
   readonly recovery: SubscriptionRecovery;
   previousPayload?: string;
   needsResubscribe: boolean;
@@ -53,8 +53,8 @@ export interface Connection {
   reconnect(): Promise<void>;
   reconnectAfterLogin(): Promise<void> | undefined;
   disconnect(): void;
-  subscribe<Value>(
-    payload: object,
+  subscribe<Value, Payload>(
+    payload: Payload,
     decode: (payload: string) => Value | undefined,
     sink: SubscriptionSink<Value>,
     recoveryPolicy: SubscriptionRecovery,
@@ -180,7 +180,7 @@ export function createConnection(
   const restoreSubscriptions = (): void => {
     for (const [requestId, subscription] of subscriptions) {
       if (!subscription.needsResubscribe) continue;
-      send(`sub ${requestId} ${JSON.stringify(subscription.payload)}`);
+      send(`sub ${requestId} ${subscription.serializedPayload}`);
       subscription.needsResubscribe = false;
     }
   };
@@ -395,8 +395,8 @@ export function createConnection(
     return reconnect();
   };
 
-  const subscribe = <Value>(
-    payload: object,
+  const subscribe = <Value, Payload>(
+    payload: Payload,
     decode: (payload: string) => Value | undefined,
     sink: SubscriptionSink<Value>,
     recoveryPolicy: SubscriptionRecovery,
@@ -404,9 +404,13 @@ export function createConnection(
     if (!connected) throw new TRConnectionError("The WebSocket is not connected");
 
     const requestId = nextRequestId++;
+    const serializedPayload = JSON.stringify(payload);
+    if (serializedPayload === undefined) {
+      throw new TRConnectionError("Could not serialize the Topic request");
+    }
     let active = true;
     const subscription: ActiveSubscription = {
-      payload,
+      serializedPayload,
       recovery: recoveryPolicy,
       needsResubscribe: false,
       accept: (rawPayload) => {
@@ -434,7 +438,7 @@ export function createConnection(
     subscriptions.set(requestId, subscription);
 
     try {
-      send(`sub ${requestId} ${JSON.stringify(payload)}`);
+      send(`sub ${requestId} ${serializedPayload}`);
     } catch (cause) {
       active = false;
       subscriptions.delete(requestId);
