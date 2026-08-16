@@ -112,8 +112,15 @@ describe("Session", () => {
       ...confirmedLoginResponses().slice(1),
     ]);
     const client = new TRClient({ fetch, clock, validate: "throw" });
+    const approvalPending = vi.fn(() => {
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+    const initialSession = client.session.getSnapshot();
 
-    const login = client.login("+49123456789", "1234", { pollIntervalMs: 2_000 });
+    const login = client.login("+49123456789", "1234", {
+      pollIntervalMs: 2_000,
+      onApprovalPending: approvalPending,
+    });
     await flushUntil(() => clock.pendingTimerCount === 2);
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(clock.pendingTimerCount).toBe(2);
@@ -122,6 +129,10 @@ describe("Session", () => {
     await login;
 
     expect(client.sessionValidity).toBe("presumed-valid");
+    expect(approvalPending).toHaveBeenCalledTimes(1);
+    expect(client.session.getSnapshot()).toMatchObject({ validity: "presumed-valid", revision: 1 });
+    expect(client.session.getSnapshot()).not.toBe(initialSession);
+    expect(Object.isFrozen(client.session.getSnapshot())).toBe(true);
     expect(client.exportSession()).not.toContain("+49123456789");
     expect(client.exportSession()).not.toContain("1234");
 
@@ -221,6 +232,54 @@ describe("Session", () => {
       ]),
     );
     await expect(Promise.all([first, second])).resolves.toEqual([undefined, undefined]);
+  });
+
+  test("publishes stable Session snapshots for each Session change", async () => {
+    const fetch = mockFetch([
+      ...confirmedLoginResponses(),
+      response(undefined, [
+        `tr_session=${jwt(1_240, 1_540)}; Path=/; Secure; HttpOnly; SameSite=Strict`,
+      ]),
+    ]);
+    const client = new TRClient({ fetch, clock: new FakeClock(startTime), validate: "throw" });
+    const listener = vi.fn();
+    const unsubscribe = client.session.subscribe(listener);
+    const initial = client.session.getSnapshot();
+
+    expect(client.session.getSnapshot()).toBe(initial);
+    await client.login("+49123456789", "1234", { pollIntervalMs: 0 });
+    expect(client.session.getSnapshot()).toMatchObject({ validity: "presumed-valid", revision: 1 });
+    await client.refresh();
+    expect(client.session.getSnapshot()).toMatchObject({ validity: "presumed-valid", revision: 2 });
+    client.logout();
+    expect(client.session.getSnapshot()).toMatchObject({ validity: "absent", revision: 3 });
+    expect(listener).toHaveBeenCalledTimes(3);
+
+    unsubscribe();
+    unsubscribe();
+    client.logout();
+    expect(client.session.getSnapshot().revision).toBe(4);
+    expect(listener).toHaveBeenCalledTimes(3);
+  });
+
+  test("does not report approval after an aborted Login has settled", async () => {
+    let resolveLogin: ((response: Response) => void) | undefined;
+    const pendingLogin = new Promise<Response>((resolve) => {
+      resolveLogin = resolve;
+    });
+    const controller = new AbortController();
+    const approvalPending = vi.fn();
+    const client = new TRClient({ fetch: mockFetch([pendingLogin]) });
+    const login = client.login("+49123456789", "1234", {
+      signal: controller.signal,
+      onApprovalPending: approvalPending,
+    });
+
+    controller.abort("cancelled");
+    resolveLogin?.(response({ processId: "too-late" }));
+
+    await expect(login).rejects.toBeInstanceOf(TRAbortError);
+    expect(approvalPending).not.toHaveBeenCalled();
   });
 
   test("does not restore a Session when Logout overtakes Refresh", async () => {
@@ -676,9 +735,13 @@ describe("Session", () => {
   test("marks a Session rejected when Trade Republic rejects Refresh", async () => {
     const fetch = mockFetch([...confirmedLoginResponses(), response({}, [], 401)]);
     const { client, clock } = await loginClient(fetch);
+    const listener = vi.fn();
+    client.session.subscribe(listener);
 
     await expect(client.refresh()).rejects.toBeInstanceOf(TRAuthError);
     expect(client.sessionValidity).toBe("rejected");
+    expect(client.session.getSnapshot()).toMatchObject({ validity: "rejected", revision: 1 });
+    expect(listener).toHaveBeenCalledTimes(1);
     expect(clock.pendingTimerCount).toBe(0);
     await expect(client.cash.get({})).rejects.toBeInstanceOf(TRAuthError);
   });

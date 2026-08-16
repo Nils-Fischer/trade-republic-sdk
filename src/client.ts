@@ -1,4 +1,9 @@
-import { createConnection, type Connection, type SubscriptionControl } from "./connection.ts";
+import {
+  createConnection,
+  type Connection,
+  type ConnectionSnapshot,
+  type SubscriptionControl,
+} from "./connection.ts";
 import {
   resolveEnvironment,
   type Environment,
@@ -24,6 +29,7 @@ import {
   type GetOptions as SessionGetOptions,
   type LoginOptions,
   type Session,
+  type SessionSnapshot,
   type SessionValidity,
 } from "./session.ts";
 import {
@@ -63,6 +69,11 @@ export interface GetTimelineTransactionsOptions {
   maxPages?: number;
 }
 
+export interface ClientStateStore<Snapshot> {
+  getSnapshot(): Snapshot;
+  subscribe(onChange: () => void): () => void;
+}
+
 type NamedTopicAccessors = {
   readonly [Name in TopicName]: TopicAccessor<Name>;
 };
@@ -86,10 +97,8 @@ const accountClientInternals = new WeakMap<TRClient, AccountClientInternals>();
 
 const DEFAULT_TIMELINE_PAGE_TIMEOUT_MS = 15_000;
 
-const duplicateAccessorName = resourceNames.find((name) => {
-  // SAFETY: Registry collision detection must compare keys from otherwise disjoint unions.
-  return topicNames.includes(name as TopicName);
-});
+const topicNameSet = new Set<string>(topicNames);
+const duplicateAccessorName = resourceNames.find((name) => topicNameSet.has(name));
 if (duplicateAccessorName) {
   throw new Error(`Duplicate TRClient accessor name "${duplicateAccessorName}"`);
 }
@@ -97,6 +106,8 @@ if (duplicateAccessorName) {
 /** The complete client for Trade Republic Topics and HTTP resources. */
 // oxlint-disable-next-line typescript/no-unsafe-declaration-merging -- The Registry installs the merged accessors in the constructor.
 export class TRClient {
+  readonly session: ClientStateStore<SessionSnapshot>;
+  readonly connection: ClientStateStore<ConnectionSnapshot>;
   readonly #environment: ResolvedEnvironment;
   readonly #session: Session;
   readonly #connection: Connection;
@@ -108,6 +119,14 @@ export class TRClient {
     this.#environment = resolveEnvironment(options);
     this.#session = createSession(this.#environment, options.session);
     this.#connection = createConnection(this.#environment, () => this.#session.cookieHeader);
+    this.session = Object.freeze({
+      getSnapshot: () => this.#session.getSnapshot(),
+      subscribe: (onChange: () => void) => this.#session.subscribe(onChange),
+    });
+    this.connection = Object.freeze({
+      getSnapshot: () => this.#connection.getSnapshot(),
+      subscribe: (onChange: () => void) => this.#connection.subscribeState(onChange),
+    });
     this.#responseValidation = {
       mode: options.validate ?? "warn",
       warn: options.onValidationWarning ?? ((warning) => console.warn(warning)),
@@ -281,6 +300,10 @@ export class TRClient {
       let finished = false;
       let recovered = false;
 
+      const unsubscribe = (): void => {
+        subscription = this.#closeSubscription(subscription);
+      };
+
       const cleanUp = (): void => {
         if (hasTimeout) this.#environment.clock.clearTimeout(timeoutHandle);
         options.signal?.removeEventListener("abort", abort);
@@ -289,11 +312,12 @@ export class TRClient {
         if (finished) return;
         finished = true;
         cleanUp();
-        subscription?.unsubscribe();
+        unsubscribe();
         action();
       };
       const fail = (error: Error): void => {
         if (this.#isAuthenticationError(error)) {
+          unsubscribe();
           if (recovered) {
             finish(() => reject(this.#session.markRejected(error)));
             return;
@@ -358,18 +382,24 @@ export class TRClient {
       throw new TRAuthError(`Topic "${name}" requires a Session`);
     }
     const payload = encodeTopicRequest(name, request);
-    let recovered = false;
 
-    for (;;) {
-      try {
-        yield* this.#watchSubscription(name, payload, signal, onSubscribed);
-        return;
-      } catch (error) {
-        if (!(error instanceof Error) || !this.#isAuthenticationError(error)) throw error;
-        if (recovered) throw this.#session.markRejected(error);
-        recovered = true;
-        await this.#recoverConnection(error);
-      }
+    yield* this.#watchWithRecovery(name, payload, signal, onSubscribed, false);
+  }
+
+  async *#watchWithRecovery<Name extends TopicName, Payload>(
+    name: Name,
+    payload: Payload,
+    signal: AbortSignal | undefined,
+    onSubscribed: (() => void) | undefined,
+    recovered: boolean,
+  ): AsyncIterableIterator<TopicResponse<Name>> {
+    try {
+      yield* this.#watchSubscription(name, payload, signal, onSubscribed);
+    } catch (error) {
+      if (!(error instanceof Error) || !this.#isAuthenticationError(error)) throw error;
+      if (recovered) throw this.#session.markRejected(error);
+      await this.#recoverConnection(error);
+      yield* this.#watchWithRecovery(name, payload, signal, onSubscribed, true);
     }
   }
 
@@ -379,17 +409,22 @@ export class TRClient {
     signal?: AbortSignal,
     onSubscribed?: () => void,
   ): AsyncIterableIterator<TopicResponse<Name>> {
-    let latest: TopicResponse<Name> | undefined;
+    let pendingValues: TopicResponse<Name>[] = [];
+    let pendingValueIndex = 0;
     let failure: Error | undefined;
     let wake: (() => void) | undefined;
     let rejectConnection: ((error: Error) => void) | undefined;
     let subscription: SubscriptionControl | undefined;
 
+    const unsubscribe = (): void => {
+      subscription = this.#closeSubscription(subscription);
+    };
+
     const abort = (): void => {
       failure = new TRAbortError(`Watch for Topic "${name}" was aborted`, {
         cause: signal?.reason,
       });
-      subscription?.unsubscribe();
+      unsubscribe();
       rejectConnection?.(failure);
       wake?.();
       wake = undefined;
@@ -421,7 +456,7 @@ export class TRClient {
       (rawPayload) => decodeTopicResponse(name, rawPayload, this.#responseValidation),
       {
         next: (value) => {
-          latest = value;
+          pendingValues.push(value);
           wake?.();
           wake = undefined;
         },
@@ -429,9 +464,6 @@ export class TRClient {
           failure = error;
           wake?.();
           wake = undefined;
-        },
-        reset: () => {
-          latest = undefined;
         },
       },
       "resume",
@@ -442,9 +474,13 @@ export class TRClient {
     try {
       for (;;) {
         if (failure) throw failure;
-        if (latest !== undefined) {
-          const value = latest;
-          latest = undefined;
+        if (pendingValueIndex < pendingValues.length) {
+          const value = pendingValues[pendingValueIndex]!;
+          pendingValueIndex += 1;
+          if (pendingValueIndex === pendingValues.length) {
+            pendingValues = [];
+            pendingValueIndex = 0;
+          }
           yield value;
           continue;
         }
@@ -454,7 +490,7 @@ export class TRClient {
       }
     } finally {
       signal?.removeEventListener("abort", abort);
-      subscription.unsubscribe();
+      unsubscribe();
     }
   }
 
@@ -466,6 +502,12 @@ export class TRClient {
     return (
       this.#connectionUpdate?.then(() => this.#connection.connect()) ?? this.#connection.connect()
     );
+  }
+
+  #closeSubscription(subscription: SubscriptionControl | undefined): undefined {
+    if (!subscription) return undefined;
+    subscription.unsubscribe();
+    this.#subscriptionCount -= 1;
   }
 
   async #recoverConnection(error: TRTopicError): Promise<void> {

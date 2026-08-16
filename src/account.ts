@@ -9,16 +9,77 @@ import type {
   TopicResponse,
 } from "./topics.ts";
 
-export type Freshness = "empty" | "fresh" | "stale";
+export type TRQuery<Value> =
+  | {
+      readonly status: "pending";
+      readonly data: undefined;
+      readonly error: undefined;
+      readonly isPending: true;
+      readonly isSuccess: false;
+      readonly isError: false;
+    }
+  | {
+      readonly status: "success";
+      readonly data: Value;
+      readonly error: undefined;
+      readonly isPending: false;
+      readonly isSuccess: true;
+      readonly isError: false;
+    }
+  | {
+      readonly status: "error";
+      readonly data: Value | undefined;
+      readonly error: Error;
+      readonly isPending: false;
+      readonly isSuccess: false;
+      readonly isError: true;
+    };
 
-export interface SliceSnapshot<Value> {
-  readonly value: Value | undefined;
-  readonly freshness: Freshness;
-  readonly error?: Error;
+const pendingTRQuery = Object.freeze({
+  status: "pending",
+  data: undefined,
+  error: undefined,
+  isPending: true,
+  isSuccess: false,
+  isError: false,
+});
+
+/** @internal Mint the shared pending query member. */
+export function pendingQuery<Value>(): TRQuery<Value> {
+  return pendingTRQuery;
 }
 
+/** @internal Mint the shared success query member. */
+export function successQuery<Value>(data: Value): TRQuery<Value> {
+  return Object.freeze({
+    status: "success",
+    data,
+    error: undefined,
+    isPending: false,
+    isSuccess: true,
+    isError: false,
+  });
+}
+
+/** @internal Mint the shared error query member. */
+export function errorQuery<Value>(error: Error, data?: Value): TRQuery<Value> {
+  return Object.freeze({
+    status: "error",
+    data,
+    error,
+    isPending: false,
+    isSuccess: false,
+    isError: true,
+  });
+}
+
+export type AccountQuery<Value> = TRQuery<Value> & {
+  readonly dataUpdatedAt: number | undefined;
+  readonly isStale: boolean;
+};
+
 export interface AccountSlice<Value> {
-  getSnapshot(): SliceSnapshot<Value>;
+  getSnapshot(): AccountQuery<Value>;
   subscribe(onChange: () => void): () => void;
 }
 
@@ -27,12 +88,12 @@ export interface MaterializedRange {
   readonly to: string;
 }
 
-export interface TransactionSnapshot extends SliceSnapshot<readonly Transaction[]> {
-  readonly materializedRange?: MaterializedRange;
-}
+export type TransactionQuery = AccountQuery<readonly Transaction[]> & {
+  readonly materializedRange: MaterializedRange | undefined;
+};
 
 export interface TransactionSlice {
-  getSnapshot(): TransactionSnapshot;
+  getSnapshot(): TransactionQuery;
   subscribe(onChange: () => void): () => void;
   read(options: TransactionRange): Promise<readonly Transaction[]>;
 }
@@ -87,8 +148,8 @@ export interface AccountDocument {
   readonly url: string;
 }
 
-type CashSnapshot = SliceSnapshot<AccountCash>;
-type DocumentSnapshot = SliceSnapshot<readonly AccountDocument[]>;
+type CashQuery = AccountQuery<AccountCash>;
+type DocumentQuery = AccountQuery<readonly AccountDocument[]>;
 type WatchName = "cash" | "availableCash" | "timelineTransactions";
 
 interface ProjectedTransaction {
@@ -123,31 +184,23 @@ interface SyncContext {
   readonly watchRevision: number;
 }
 
-interface MutableSliceSnapshot<Value> {
-  value: Value | undefined;
-  freshness: Freshness;
-  error?: Error;
-}
-
-interface MutableTransactionSnapshot extends MutableSliceSnapshot<readonly Transaction[]> {
-  materializedRange?: MaterializedRange;
-}
-
-class SnapshotStore<Value, Snapshot extends SliceSnapshot<Value>> {
+class SnapshotStore<Value, Snapshot extends AccountQuery<Value>> {
   #snapshot: Snapshot;
   readonly #listeners = new Set<() => void>();
-  readonly #transition: (
-    snapshot: Snapshot,
-    freshness: "stale" | "empty",
-    error?: Error,
-  ) => Snapshot;
+  readonly #failure: (snapshot: Snapshot, error: Error) => Snapshot;
+  readonly #pending: () => Snapshot;
+  readonly #stale: (snapshot: Snapshot, isStale: boolean) => Snapshot;
 
   constructor(
     initial: Snapshot,
-    transition: (snapshot: Snapshot, freshness: "stale" | "empty", error?: Error) => Snapshot,
+    failure: (snapshot: Snapshot, error: Error) => Snapshot,
+    pending: () => Snapshot,
+    stale: (snapshot: Snapshot, isStale: boolean) => Snapshot,
   ) {
     this.#snapshot = initial;
-    this.#transition = transition;
+    this.#failure = failure;
+    this.#pending = pending;
+    this.#stale = stale;
   }
 
   getSnapshot = (): Snapshot => this.#snapshot;
@@ -169,14 +222,19 @@ class SnapshotStore<Value, Snapshot extends SliceSnapshot<Value>> {
   }
 
   fail(error: Error): void {
-    const freshness = this.#snapshot.freshness === "empty" ? "empty" : "stale";
-    if (this.#snapshot.error === error && this.#snapshot.freshness === freshness) return;
-    this.replace(this.#transition(this.#snapshot, freshness, error));
+    if (this.#snapshot.status === "error" && this.#snapshot.error === error) return;
+    this.replace(this.#failure(this.#snapshot, error));
   }
 
-  markStopped(): void {
-    if (this.#snapshot.freshness !== "fresh") return;
-    this.replace(this.#transition(this.#snapshot, "stale"));
+  clear(): void {
+    if (this.#snapshot.status === "pending") return;
+    this.replace(this.#pending());
+  }
+
+  setStale(isStale: boolean): void {
+    const next = this.#snapshot.data === undefined ? false : isStale;
+    if (this.#snapshot.isStale === next) return;
+    this.replace(this.#stale(this.#snapshot, next));
   }
 }
 
@@ -189,18 +247,32 @@ export class TRAccount {
   readonly #client: TRClient;
   readonly #windowFrom: number;
   readonly #windowFromIso: string;
-  readonly #cashStore = new SnapshotStore<AccountCash, CashSnapshot>(
-    emptySnapshot(),
-    (current, freshness, error) => snapshot(current.value, freshness, error),
+  readonly #cashStore = new SnapshotStore<AccountCash, CashQuery>(
+    snapshot("pending", undefined, undefined, false),
+    (current, error) =>
+      snapshot("error", current.data, current.dataUpdatedAt, current.isStale, error),
+    () => snapshot("pending", undefined, undefined, false),
+    (current, isStale) => accountQueryWithStaleness(current, isStale),
   );
-  readonly #transactionStore = new SnapshotStore<readonly Transaction[], TransactionSnapshot>(
-    emptySnapshot(),
-    (current, freshness, error) =>
-      transactionSnapshot(current.value, freshness, current.materializedRange, error),
+  readonly #transactionStore = new SnapshotStore<readonly Transaction[], TransactionQuery>(
+    transactionSnapshot("pending", undefined, undefined, false, undefined),
+    (current, error) =>
+      transactionSnapshot(
+        "error",
+        current.data,
+        current.dataUpdatedAt,
+        current.isStale,
+        current.materializedRange,
+        error,
+      ),
+    () => transactionSnapshot("pending", undefined, undefined, false, undefined),
+    (current, isStale) => transactionQueryWithStaleness(current, isStale),
   );
-  readonly #documentStore = new SnapshotStore<readonly AccountDocument[], DocumentSnapshot>(
-    emptySnapshot(),
-    (current, freshness, error) => snapshot(current.value, freshness, error),
+  readonly #documentStore = new SnapshotStore<readonly AccountDocument[], DocumentQuery>(
+    snapshot("pending", undefined, undefined, false),
+    (current, error) => snapshot("error", current.data, current.dataUpdatedAt, false, error),
+    () => snapshot("pending", undefined, undefined, false),
+    (current) => current,
   );
   readonly #watchSlots = new Map<WatchName, WatchSlot>();
   readonly #pendingReads = new Set<AbortController>();
@@ -215,11 +287,14 @@ export class TRAccount {
   #syncPromise: Promise<void> | undefined;
   #syncController: AbortController | undefined;
   #token = 0;
+  #connectionAlive = false;
+  #recoveryObserved = false;
 
   constructor(client: TRClient, options: TRAccountOptions) {
     this.#client = client;
     this.#windowFrom = validDate(options.transactionWindow.from, "transactionWindow.from");
     this.#windowFromIso = new Date(this.#windowFrom).toISOString();
+    this.#connectionAlive = client.connection.getSnapshot().isAlive;
 
     this.cash = Object.freeze({
       getSnapshot: this.#cashStore.getSnapshot,
@@ -234,6 +309,10 @@ export class TRAccount {
       getSnapshot: this.#documentStore.getSnapshot,
       subscribe: this.#documentStore.subscribe,
     });
+    client.session.subscribe(() => {
+      if (client.session.getSnapshot().validity === "absent") this.#clear("Session cleared");
+    });
+    client.connection.subscribe(() => this.#handleConnectionChange());
   }
 
   sync(options: { signal?: AbortSignal } = {}): Promise<void> {
@@ -265,20 +344,42 @@ export class TRAccount {
   }
 
   stop(): void {
+    this.#clear("TRAccount stopped");
+  }
+
+  #clear(reason: string): void {
     this.#token += 1;
-    this.#syncController?.abort("TRAccount stopped");
+    this.#syncController?.abort(reason);
     this.#syncController = undefined;
     this.#syncPromise = undefined;
-    for (const slot of this.#watchSlots.values()) slot.controller.abort("TRAccount stopped");
+    for (const slot of this.#watchSlots.values()) slot.controller.abort(reason);
     this.#watchSlots.clear();
-    for (const controller of this.#pendingReads) controller.abort("TRAccount stopped");
+    for (const controller of this.#pendingReads) controller.abort(reason);
     this.#pendingReads.clear();
     this.#cashWatchSeen = { cash: false, availableCash: false };
     this.#watchTransactions.clear();
+    this.#transactionsById.clear();
+    this.#cashBalances = undefined;
+    this.#availableBalances = undefined;
+    this.#materializedTo = undefined;
     this.#lastTimelineWatchAt = undefined;
-    this.#cashStore.markStopped();
-    this.#transactionStore.markStopped();
-    this.#documentStore.markStopped();
+    this.#recoveryObserved = false;
+    this.#cashStore.clear();
+    this.#transactionStore.clear();
+    this.#documentStore.clear();
+  }
+
+  #handleConnectionChange(): void {
+    const connection = this.#client.connection.getSnapshot();
+    const wasAlive = this.#connectionAlive;
+    this.#connectionAlive = connection.isAlive;
+    if (connection.isRecovering) this.#recoveryObserved = true;
+    this.#cashStore.setStale(!connection.isAlive);
+    this.#transactionStore.setStale(!connection.isAlive);
+    if (connection.isAlive && !wasAlive && this.#recoveryObserved && this.#watchSlots.size > 0) {
+      this.#recoveryObserved = false;
+      void this.sync().catch(() => undefined);
+    }
   }
 
   async #runSync(context: SyncContext): Promise<void> {
@@ -304,7 +405,7 @@ export class TRAccount {
       if (context.controller.signal.aborted || context.token !== this.#token) {
         context.controller.signal.removeEventListener("abort", cancelCreatedWatches);
         return this.#finishAbortedSync(context, [
-          this.#cashStore.getSnapshot().freshness === "fresh",
+          this.#cashStore.getSnapshot().status === "success",
           false,
           false,
         ]);
@@ -563,7 +664,7 @@ export class TRAccount {
 
     const snapshot = this.#transactionStore.getSnapshot();
     if (
-      snapshot.freshness === "fresh" &&
+      snapshot.status === "success" &&
       this.#materializedTo !== undefined &&
       from >= this.#windowFrom &&
       to <= this.#materializedTo
@@ -637,8 +738,16 @@ export class TRAccount {
       available: this.#availableBalances,
     });
     const current = this.#cashStore.getSnapshot();
-    if (current.freshness === "fresh" && current.value && equalCash(current.value, value)) return;
-    this.#cashStore.replace(snapshot(value, "fresh"));
+    const unchanged = current.data !== undefined && equalCash(current.data, value);
+    if (current.status === "success" && unchanged) return;
+    this.#cashStore.replace(
+      snapshot(
+        "success",
+        value,
+        unchanged ? current.dataUpdatedAt : accountClientNow(this.#client),
+        !this.#client.connection.getSnapshot().isAlive,
+      ),
+    );
   }
 
   #commitCashFailure(error: Error): void {
@@ -652,14 +761,23 @@ export class TRAccount {
       available: this.#availableBalances,
     });
     if (
-      current.freshness === "stale" &&
+      current.status === "error" &&
       current.error === error &&
-      current.value &&
-      equalCash(current.value, value)
+      current.data &&
+      equalCash(current.data, value)
     ) {
       return;
     }
-    this.#cashStore.replace(snapshot(value, "stale", error));
+    const unchanged = current.data !== undefined && equalCash(current.data, value);
+    this.#cashStore.replace(
+      snapshot(
+        "error",
+        value,
+        unchanged ? current.dataUpdatedAt : accountClientNow(this.#client),
+        !this.#client.connection.getSnapshot().isAlive,
+        error,
+      ),
+    );
   }
 
   #commitTransactions(): void {
@@ -667,21 +785,37 @@ export class TRAccount {
     const current = this.#transactionStore.getSnapshot();
     const range = this.#materializedRange();
     if (
-      current.freshness === "fresh" &&
-      current.value &&
-      equalTransactions(current.value, value) &&
+      current.status === "success" &&
+      current.data &&
+      equalTransactions(current.data, value) &&
       equalRange(current.materializedRange, range)
     ) {
       return;
     }
-    this.#transactionStore.replace(transactionSnapshot(value, "fresh", range));
+    const unchanged = current.data !== undefined && equalTransactions(current.data, value);
+    this.#transactionStore.replace(
+      transactionSnapshot(
+        "success",
+        value,
+        unchanged ? current.dataUpdatedAt : accountClientNow(this.#client),
+        !this.#client.connection.getSnapshot().isAlive,
+        range,
+      ),
+    );
   }
 
   #commitDocuments(value: readonly AccountDocument[]): void {
     const current = this.#documentStore.getSnapshot();
-    if (current.freshness === "fresh" && current.value && equalDocuments(current.value, value))
-      return;
-    this.#documentStore.replace(snapshot(value, "fresh"));
+    const unchanged = current.data !== undefined && equalDocuments(current.data, value);
+    if (current.status === "success" && unchanged) return;
+    this.#documentStore.replace(
+      snapshot(
+        "success",
+        value,
+        unchanged ? current.dataUpdatedAt : accountClientNow(this.#client),
+        false,
+      ),
+    );
   }
 
   #materializedRange(): MaterializedRange | undefined {
@@ -741,33 +875,133 @@ function deferred<Value>(): Deferred<Value> {
   };
 }
 
-function emptySnapshot<Value>(): SliceSnapshot<Value> {
-  return Object.freeze({ value: undefined, freshness: "empty" });
+function snapshot<Value>(
+  status: "pending",
+  data: undefined,
+  dataUpdatedAt: undefined,
+  isStale: false,
+): AccountQuery<Value>;
+function snapshot<Value>(
+  status: "success",
+  data: Value,
+  dataUpdatedAt: number | undefined,
+  isStale: boolean,
+): AccountQuery<Value>;
+function snapshot<Value>(
+  status: "error",
+  data: Value | undefined,
+  dataUpdatedAt: number | undefined,
+  isStale: boolean,
+  error: Error,
+): AccountQuery<Value>;
+function snapshot<Value>(
+  status: TRQuery<Value>["status"],
+  data: Value | undefined,
+  dataUpdatedAt: number | undefined,
+  isStale: boolean,
+  error?: Error,
+): AccountQuery<Value> {
+  if (status === "pending") {
+    return Object.freeze({
+      ...pendingQuery<Value>(),
+      dataUpdatedAt: undefined,
+      isStale: false,
+    });
+  }
+  if (status === "success") {
+    if (data === undefined) throw new Error("A successful TRQuery requires data");
+    return Object.freeze({
+      ...successQuery(data),
+      dataUpdatedAt,
+      isStale,
+    });
+  }
+  if (!error) throw new Error("An error TRQuery requires an Error");
+  return Object.freeze({
+    ...errorQuery(error, data),
+    dataUpdatedAt,
+    isStale: data === undefined ? false : isStale,
+  });
 }
 
-function snapshot<Value>(
-  value: Value | undefined,
-  freshness: Freshness,
-  error?: Error,
-): SliceSnapshot<Value> {
-  const result: MutableSliceSnapshot<Value> = {
-    value,
-    freshness,
-  };
-  if (error) result.error = error;
-  return Object.freeze(result);
+function accountQueryWithStaleness<Value>(
+  query: AccountQuery<Value>,
+  isStale: boolean,
+): AccountQuery<Value> {
+  if (query.status === "pending") return snapshot("pending", undefined, undefined, false);
+  if (query.status === "success") {
+    return snapshot("success", query.data, query.dataUpdatedAt, isStale);
+  }
+  return snapshot("error", query.data, query.dataUpdatedAt, isStale, query.error);
 }
 
 function transactionSnapshot(
-  value: readonly Transaction[] | undefined,
-  freshness: Freshness,
-  range?: MaterializedRange,
+  status: "pending",
+  data: undefined,
+  dataUpdatedAt: undefined,
+  isStale: false,
+  materializedRange: undefined,
+): TransactionQuery;
+function transactionSnapshot(
+  status: "success",
+  data: readonly Transaction[],
+  dataUpdatedAt: number | undefined,
+  isStale: boolean,
+  materializedRange: MaterializedRange | undefined,
+): TransactionQuery;
+function transactionSnapshot(
+  status: "error",
+  data: readonly Transaction[] | undefined,
+  dataUpdatedAt: number | undefined,
+  isStale: boolean,
+  materializedRange: MaterializedRange | undefined,
+  error: Error,
+): TransactionQuery;
+function transactionSnapshot(
+  status: TRQuery<readonly Transaction[]>["status"],
+  data: readonly Transaction[] | undefined,
+  dataUpdatedAt: number | undefined,
+  isStale: boolean,
+  materializedRange: MaterializedRange | undefined,
   error?: Error,
-): TransactionSnapshot {
-  const result: MutableTransactionSnapshot = { value, freshness };
-  if (range) result.materializedRange = range;
-  if (error) result.error = error;
-  return Object.freeze(result);
+): TransactionQuery {
+  let query: AccountQuery<readonly Transaction[]>;
+  if (status === "pending") {
+    query = snapshot("pending", undefined, undefined, false);
+  } else if (status === "success") {
+    if (data === undefined) throw new Error("A successful TransactionQuery requires data");
+    query = snapshot("success", data, dataUpdatedAt, isStale);
+  } else {
+    if (!error) throw new Error("An error TransactionQuery requires an Error");
+    query = snapshot("error", data, dataUpdatedAt, isStale, error);
+  }
+  return Object.freeze({ ...query, materializedRange });
+}
+
+function transactionQueryWithStaleness(
+  query: TransactionQuery,
+  isStale: boolean,
+): TransactionQuery {
+  if (query.status === "pending") {
+    return transactionSnapshot("pending", undefined, undefined, false, undefined);
+  }
+  if (query.status === "success") {
+    return transactionSnapshot(
+      "success",
+      query.data,
+      query.dataUpdatedAt,
+      isStale,
+      query.materializedRange,
+    );
+  }
+  return transactionSnapshot(
+    "error",
+    query.data,
+    query.dataUpdatedAt,
+    isStale,
+    query.materializedRange,
+    query.error,
+  );
 }
 
 function projectCash(value: CashResponse): readonly AccountCashBalance[] {

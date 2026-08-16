@@ -49,6 +49,8 @@ interface Deferred {
 
 export interface Connection {
   readonly isAlive: boolean;
+  getSnapshot(): ConnectionSnapshot;
+  subscribeState(onChange: () => void): () => void;
   connect(): Promise<void>;
   reconnect(): Promise<void>;
   reconnectAfterLogin(): Promise<void> | undefined;
@@ -59,6 +61,11 @@ export interface Connection {
     sink: SubscriptionSink<Value>,
     recoveryPolicy: SubscriptionRecovery,
   ): SubscriptionControl;
+}
+
+export interface ConnectionSnapshot {
+  readonly isAlive: boolean;
+  readonly isRecovering: boolean;
 }
 
 export function createConnection(
@@ -79,7 +86,33 @@ export function createConnection(
   let nextRequestId = 1;
   let connected = false;
   let alive = false;
+  let recovering = false;
+  let connectionSnapshot: ConnectionSnapshot = Object.freeze({
+    isAlive: alive,
+    isRecovering: recovering,
+  });
+  const listeners = new Set<() => void>();
   let generation = 0;
+
+  const publish = (): void => {
+    if (connectionSnapshot.isAlive === alive && connectionSnapshot.isRecovering === recovering) {
+      return;
+    }
+    connectionSnapshot = Object.freeze({ isAlive: alive, isRecovering: recovering });
+    for (const listener of Array.from(listeners)) listener();
+  };
+
+  const setAlive = (value: boolean): void => {
+    if (alive === value) return;
+    alive = value;
+    publish();
+  };
+
+  const setRecovering = (value: boolean): void => {
+    if (recovering === value) return;
+    recovering = value;
+    publish();
+  };
 
   const clearEcho = (): void => {
     if (echoTimer !== undefined) environment.clock.clearInterval(echoTimer);
@@ -107,7 +140,7 @@ export function createConnection(
 
   const abandonTransport = (): void => {
     connected = false;
-    alive = false;
+    setAlive(false);
     clearEcho();
     connectionPromise = undefined;
     rejectConnection = undefined;
@@ -137,6 +170,7 @@ export function createConnection(
     const current = recovery;
     recovery = undefined;
     recoveryDelayIndex = 0;
+    setRecovering(false);
     current?.resolve();
   };
 
@@ -145,6 +179,7 @@ export function createConnection(
     const current = recovery;
     recovery = undefined;
     recoveryDelayIndex = 0;
+    setRecovering(false);
     current?.reject(error);
   };
 
@@ -248,7 +283,7 @@ export function createConnection(
         const echo = `echo ${environment.clock.now()}`;
         lastEcho = echo;
         awaitingEcho = true;
-        alive = false;
+        setAlive(false);
         try {
           send(echo);
         } catch (cause) {
@@ -289,7 +324,7 @@ export function createConnection(
         if (data.startsWith("echo ")) {
           if (data === lastEcho) {
             awaitingEcho = false;
-            alive = true;
+            setAlive(true);
           }
           return;
         }
@@ -351,6 +386,7 @@ export function createConnection(
     if (!hasRecoverableSubscriptions()) return;
     if (!recovery) {
       recovery = createDeferred();
+      setRecovering(true);
       void recovery.promise.catch(() => undefined);
     }
     scheduleRecovery();
@@ -442,7 +478,7 @@ export function createConnection(
     } catch (cause) {
       active = false;
       subscriptions.delete(requestId);
-      sink.error(toConnectionError("Could not subscribe to the Topic", cause));
+      throw toConnectionError("Could not subscribe to the Topic", cause);
     }
 
     return {
@@ -469,6 +505,16 @@ export function createConnection(
   return {
     get isAlive() {
       return alive;
+    },
+    getSnapshot: () => connectionSnapshot,
+    subscribeState: (onChange) => {
+      listeners.add(onChange);
+      let active = true;
+      return () => {
+        if (!active) return;
+        active = false;
+        listeners.delete(onChange);
+      };
     },
     connect,
     reconnect,

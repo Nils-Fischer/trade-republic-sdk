@@ -28,7 +28,7 @@ export interface AccessorCounts {
 }
 
 export interface AccountSliceSummary {
-  readonly freshness: "empty" | "fresh" | "stale";
+  readonly status: "pending" | "success" | "error";
   readonly items?: number;
   readonly from?: string;
   readonly to?: string;
@@ -81,7 +81,7 @@ export function createLiveReport(write: (line: string) => void): LiveReport {
     const counts =
       summary.items === undefined ? "" : ` (${summary.items} ${plural(summary.items, "item")})`;
     const range = summary.from && summary.to ? ` (${summary.from} to ${summary.to})` : "";
-    write(`TRAccount.${slice}: ${summary.freshness}${counts}${range}`);
+    write(`TRAccount.${slice}: ${summary.status}${counts}${range}`);
   };
 
   const finish = (): boolean => {

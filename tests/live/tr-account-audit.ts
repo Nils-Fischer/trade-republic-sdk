@@ -15,18 +15,18 @@ export async function auditTRAccount(client: TRClient, report: LiveReport): Prom
     const transactions = account.transactions.getSnapshot();
     const documents = account.documents.getSnapshot();
     report.accountSlice("cash", {
-      freshness: cash.freshness,
-      items: (cash.value?.balances.length ?? 0) + (cash.value?.available.length ?? 0),
+      status: cash.status,
+      items: (cash.data?.balances.length ?? 0) + (cash.data?.available.length ?? 0),
     });
     report.accountSlice("transactions", {
-      freshness: transactions.freshness,
-      items: transactions.value?.length ?? 0,
+      status: transactions.status,
+      items: transactions.data?.length ?? 0,
       from: transactions.materializedRange?.from,
       to: transactions.materializedRange?.to,
     });
     report.accountSlice("documents", {
-      freshness: documents.freshness,
-      items: documents.value?.length ?? 0,
+      status: documents.status,
+      items: documents.data?.length ?? 0,
     });
 
     const range = transactions.materializedRange;
@@ -43,20 +43,20 @@ export async function auditTRAccount(client: TRClient, report: LiveReport): Prom
 
     account.stop();
     report.accountSlice("cash.stopped", {
-      freshness: account.cash.getSnapshot().freshness,
+      status: account.cash.getSnapshot().status,
     });
     report.accountSlice("transactions.stopped", {
-      freshness: account.transactions.getSnapshot().freshness,
+      status: account.transactions.getSnapshot().status,
     });
     report.accountSlice("documents.stopped", {
-      freshness: account.documents.getSnapshot().freshness,
+      status: account.documents.getSnapshot().status,
     });
     if (
-      account.cash.getSnapshot().freshness !== "stale" ||
-      account.transactions.getSnapshot().freshness !== "stale" ||
-      account.documents.getSnapshot().freshness !== "stale"
+      account.cash.getSnapshot().status !== "pending" ||
+      account.transactions.getSnapshot().status !== "pending" ||
+      account.documents.getSnapshot().status !== "pending"
     ) {
-      throw new TRValidationError("TRAccount Stop did not make every slice stale");
+      throw new TRValidationError("TRAccount Stop did not clear every Slice");
     }
   } catch (error) {
     report.failure("TRAccount.sync", error instanceof Error ? error : new Error("unknown"));

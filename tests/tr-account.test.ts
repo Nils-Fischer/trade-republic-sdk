@@ -98,7 +98,7 @@ function setup(fetch: Fetch = vi.fn<Fetch>(async () => documentResponse())) {
     validate: "throw",
   });
   const account = new TRAccount(client, { transactionWindow: { from } });
-  return { account, clock, fetch, socket };
+  return { account, client, clock, fetch, socket };
 }
 
 function initialRequests(socket: FakeSocket) {
@@ -145,7 +145,16 @@ describe("TRAccount", () => {
     const client = new TRClient({ fetch, socket, session: savedSession() });
 
     const account = new TRAccount(client, { transactionWindow: { from } });
-    const initial = { value: undefined, freshness: "empty" };
+    const initial = {
+      status: "pending",
+      data: undefined,
+      error: undefined,
+      isPending: true,
+      isSuccess: false,
+      isError: false,
+      dataUpdatedAt: undefined,
+      isStale: false,
+    };
     expect(account.cash.getSnapshot()).toEqual(initial);
     expect(account.transactions.getSnapshot()).toEqual(initial);
     expect(account.documents.getSnapshot()).toEqual(initial);
@@ -164,19 +173,21 @@ describe("TRAccount", () => {
     await completeInitialSync(account, socket, [newer], [older]);
 
     expect(account.cash.getSnapshot()).toMatchObject({
-      freshness: "fresh",
-      value: {
+      status: "success",
+      dataUpdatedAt: now,
+      isStale: true,
+      data: {
         balances: [{ accountNumber: "cash-1", currency: "EUR", amount: 100 }],
         available: [{ accountNumber: "cash-1", currency: "EUR", amount: 80 }],
       },
     });
     expect(account.transactions.getSnapshot()).toMatchObject({
-      freshness: "fresh",
+      status: "success",
       materializedRange: {
         from: "2026-01-01T00:00:00.000Z",
         to: "2026-01-10T00:00:00.000Z",
       },
-      value: [
+      data: [
         {
           id: "same",
           description: "Watch",
@@ -187,11 +198,12 @@ describe("TRAccount", () => {
       ],
     });
     expect(account.documents.getSnapshot()).toMatchObject({
-      freshness: "fresh",
-      value: [{ id: "document-1", contentType: "application/pdf", version: 1 }],
+      status: "success",
+      isStale: false,
+      data: [{ id: "document-1", contentType: "application/pdf", version: 1 }],
     });
-    expect(Object.isFrozen(account.cash.getSnapshot().value?.balances)).toBe(true);
-    expect(Object.isFrozen(account.transactions.getSnapshot().value?.[0]?.amount)).toBe(true);
+    expect(Object.isFrozen(account.cash.getSnapshot().data?.balances)).toBe(true);
+    expect(Object.isFrozen(account.transactions.getSnapshot().data?.[0]?.amount)).toBe(true);
   });
 
   test("keeps Snapshot identity for repeats, reads covered ranges locally, and stops", async () => {
@@ -220,12 +232,12 @@ describe("TRAccount", () => {
     unsubscribe();
     account.stop();
     account.stop();
-    expect(account.cash.getSnapshot().freshness).toBe("stale");
+    expect(account.cash.getSnapshot().status).toBe("pending");
     expect(account.transactions.getSnapshot()).toMatchObject({
-      freshness: "stale",
-      value: [{ id: item.id }],
+      status: "pending",
+      data: undefined,
     });
-    expect(account.documents.getSnapshot().freshness).toBe("stale");
+    expect(account.documents.getSnapshot().status).toBe("pending");
     expect(socket.sent.filter((line) => line.startsWith("unsub "))).toHaveLength(4);
   });
 
@@ -245,7 +257,7 @@ describe("TRAccount", () => {
     socket.receive(snapshot(history.id, { items: [], cursors: {} }));
     await first;
     expect(account.transactions.getSnapshot()).toMatchObject({
-      value: [],
+      data: [],
       materializedRange: {
         from: "2026-01-01T00:00:00.000Z",
         to: "2026-01-10T00:00:00.000Z",
@@ -283,11 +295,11 @@ describe("TRAccount", () => {
     controller.abort("cancel");
 
     await expect(syncing).rejects.toBeInstanceOf(TRAbortError);
-    expect(account.cash.getSnapshot().freshness).toBe("empty");
+    expect(account.cash.getSnapshot().status).toBe("error");
     expect(account.cash.getSnapshot().error).toBeInstanceOf(TRAbortError);
-    expect(account.transactions.getSnapshot().freshness).toBe("empty");
+    expect(account.transactions.getSnapshot().status).toBe("error");
     expect(account.transactions.getSnapshot().error).toBeInstanceOf(TRAbortError);
-    expect(account.documents.getSnapshot().freshness).toBe("empty");
+    expect(account.documents.getSnapshot().status).toBe("error");
     expect(account.documents.getSnapshot().error).toBeInstanceOf(TRAbortError);
     expect(socket.sent.filter((line) => line.startsWith("unsub "))).toHaveLength(3);
   });
@@ -308,10 +320,10 @@ describe("TRAccount", () => {
     socket.receive(snapshot(history.id, { items: [], cursors: {} }));
 
     await expect(syncing).rejects.toThrow("Duplicate cash balance");
-    expect(account.cash.getSnapshot().freshness).toBe("empty");
+    expect(account.cash.getSnapshot().status).toBe("error");
     expect(account.cash.getSnapshot().error).toBeInstanceOf(TRValidationError);
-    expect(account.transactions.getSnapshot().freshness).toBe("fresh");
-    expect(account.documents.getSnapshot().freshness).toBe("fresh");
+    expect(account.transactions.getSnapshot().status).toBe("success");
+    expect(account.documents.getSnapshot().status).toBe("success");
   });
 
   test("keeps a failed first transaction read empty and validates ranges before I/O", async () => {
@@ -331,8 +343,8 @@ describe("TRAccount", () => {
     socket.receive(snapshot(history.id, { items: [unsafe], cursors: {} }));
 
     await expect(syncing).rejects.toThrow("unsafe minor units");
-    expect(account.transactions.getSnapshot().value).toBeUndefined();
-    expect(account.transactions.getSnapshot().freshness).toBe("empty");
+    expect(account.transactions.getSnapshot().data).toBeUndefined();
+    expect(account.transactions.getSnapshot().status).toBe("error");
     const subscriptionCount = subscriptions(socket).length;
     await expect(
       account.transactions.read({
@@ -355,10 +367,10 @@ describe("TRAccount", () => {
     );
     await flush();
 
-    expect(account.transactions.getSnapshot().freshness).toBe("stale");
+    expect(account.transactions.getSnapshot().status).toBe("error");
     expect(account.transactions.getSnapshot().error).toBeInstanceOf(TRTopicError);
-    expect(account.cash.getSnapshot().freshness).toBe("fresh");
-    expect(account.documents.getSnapshot().freshness).toBe("fresh");
+    expect(account.cash.getSnapshot().status).toBe("success");
+    expect(account.documents.getSnapshot().status).toBe("success");
   });
 
   test("returns out-of-Window reads without retaining their Transactions", async () => {
@@ -381,15 +393,15 @@ describe("TRAccount", () => {
     );
 
     await expect(reading).resolves.toMatchObject([{ id: "inside" }, { id: "outside" }]);
-    expect(account.transactions.getSnapshot().value).toMatchObject([{ id: "inside" }]);
+    expect(account.transactions.getSnapshot().data).toMatchObject([{ id: "inside" }]);
     expect(account.transactions.getSnapshot().materializedRange).toEqual({
       from: "2026-01-01T00:00:00.000Z",
       to: "2026-01-10T00:00:00.000Z",
     });
   });
 
-  test("notifies only Cash once per semantic change and sorts both balance arrays", async () => {
-    const { account, socket } = setup();
+  test("notifies only Cash once per semantic change and advances its change time", async () => {
+    const { account, clock, socket } = setup();
     await completeInitialSync(account, socket);
     const { cash, available } = initialRequests(socket);
     const cashListener = vi.fn();
@@ -403,22 +415,27 @@ describe("TRAccount", () => {
       { accountNumber: "cash-2", currencyId: "USD", amount: 2 },
       { accountNumber: "cash-1", currencyId: "EUR", amount: 1 },
     ];
+    clock.advanceBy(100);
     socket.receive(snapshot(cash.id, balances));
     await flush();
     const afterCash = account.cash.getSnapshot();
-    expect(afterCash.value?.balances).toMatchObject([
+    expect(afterCash.data?.balances).toMatchObject([
       { accountNumber: "cash-1", currency: "EUR" },
       { accountNumber: "cash-2", currency: "USD" },
     ]);
     expect(cashListener).toHaveBeenCalledTimes(1);
+    expect(afterCash.dataUpdatedAt).toBe(now + 100);
     expect(transactionListener).not.toHaveBeenCalled();
     expect(documentListener).not.toHaveBeenCalled();
 
+    clock.advanceBy(100);
     socket.receive(snapshot(cash.id, [...balances].reverse()));
     await flush();
     expect(account.cash.getSnapshot()).toBe(afterCash);
+    expect(account.cash.getSnapshot().dataUpdatedAt).toBe(now + 100);
     expect(cashListener).toHaveBeenCalledTimes(1);
 
+    clock.advanceBy(100);
     socket.receive(
       snapshot(available.id, [
         { accountNumber: "cash-2", currencyId: "USD", amount: 2 },
@@ -426,17 +443,18 @@ describe("TRAccount", () => {
       ]),
     );
     await flush();
-    expect(account.cash.getSnapshot().value?.available).toMatchObject([
+    expect(account.cash.getSnapshot().data?.available).toMatchObject([
       { accountNumber: "cash-1", currency: "EUR" },
       { accountNumber: "cash-2", currency: "USD" },
     ]);
     expect(cashListener).toHaveBeenCalledTimes(2);
+    expect(account.cash.getSnapshot().dataUpdatedAt).toBe(now + 300);
   });
 
   test("notifies once for each real Transaction and document change", async () => {
     let documentRead = 0;
     const fetch = vi.fn<Fetch>(async () => documentResponse(++documentRead));
-    const { account, socket } = setup(fetch);
+    const { account, clock, socket } = setup(fetch);
     await completeInitialSync(account, socket);
     const timeline = initialRequests(socket).timeline[0]!;
     const transactionListener = vi.fn();
@@ -447,12 +465,15 @@ describe("TRAccount", () => {
     const beforeDocument = account.documents.getSnapshot();
     const item = transaction("watch-change", "2026-01-06T00:00:00.000Z");
 
+    clock.advanceBy(100);
     socket.receive(snapshot(timeline.id, { items: [item], cursors: {} }));
     await flush();
     expect(account.transactions.getSnapshot()).not.toBe(beforeTransaction);
+    expect(account.transactions.getSnapshot().dataUpdatedAt).toBe(now + 100);
     expect(transactionListener).toHaveBeenCalledTimes(1);
     expect(documentListener).not.toHaveBeenCalled();
 
+    clock.advanceBy(100);
     const subscriptionCount = subscriptions(socket).length;
     const syncing = account.sync();
     await flush();
@@ -470,9 +491,12 @@ describe("TRAccount", () => {
     await syncing;
 
     expect(account.documents.getSnapshot()).not.toBe(beforeDocument);
-    expect(account.documents.getSnapshot().value?.[0]?.version).toBe(2);
+    expect(account.documents.getSnapshot().data?.[0]?.version).toBe(2);
+    expect(account.documents.getSnapshot().dataUpdatedAt).toBe(now + 200);
+    expect(account.documents.getSnapshot().isStale).toBe(false);
+    expect(account.transactions.getSnapshot().dataUpdatedAt).toBe(now + 100);
     expect(documentListener).toHaveBeenCalledTimes(1);
-    expect(transactionListener).toHaveBeenCalledTimes(1);
+    expect(transactionListener).toHaveBeenCalledTimes(2);
   });
 
   test("filters, deduplicates, and tie-orders normalized Transactions", async () => {
@@ -498,13 +522,13 @@ describe("TRAccount", () => {
       ],
     );
 
-    expect(account.transactions.getSnapshot().value?.map((value) => value.id)).toEqual([
+    expect(account.transactions.getSnapshot().data?.map((value) => value.id)).toEqual([
       "newest",
       "duplicate",
       "a",
       "b",
     ]);
-    expect(account.transactions.getSnapshot().value?.[1]?.description).toBe("Last");
+    expect(account.transactions.getSnapshot().data?.[1]?.description).toBe("Last");
   });
 
   test("ignores late Watch values after Stop and can Sync again", async () => {
@@ -551,11 +575,11 @@ describe("TRAccount", () => {
     socket.receive(snapshot(history.id, { items: [], cursors: {} }));
     await syncing;
 
-    expect(account.transactions.getSnapshot().freshness).toBe("fresh");
-    expect(account.transactions.getSnapshot().value?.map((value) => value.id)).toEqual(["current"]);
+    expect(account.transactions.getSnapshot().status).toBe("success");
+    expect(account.transactions.getSnapshot().data?.map((value) => value.id)).toEqual(["current"]);
   });
 
-  test("keeps slices fresh while TRClient recovers the Watch connection", async () => {
+  test("marks Watch slices stale and runs one Sync after connection recovery", async () => {
     const clock = new FakeClock(now);
     const sockets: FakeSocket[] = [];
     const client = new TRClient({
@@ -585,14 +609,72 @@ describe("TRAccount", () => {
 
     const listener = vi.fn();
     account.transactions.subscribe(listener);
+    clock.advanceBy(2_500);
+    sockets[0]!.receive(sockets[0]!.sent.at(-1)!);
+    expect(account.transactions.getSnapshot().isStale).toBe(false);
     sockets[0]!.drop();
-    expect(account.transactions.getSnapshot().freshness).toBe("fresh");
+    expect(account.transactions.getSnapshot().status).toBe("success");
+    expect(account.transactions.getSnapshot().isStale).toBe(true);
+    expect(account.cash.getSnapshot().isStale).toBe(true);
+    expect(account.documents.getSnapshot().isStale).toBe(false);
+    expect(client.connection.getSnapshot()).toEqual({ isAlive: false, isRecovering: true });
     clock.advanceBy(1_000);
     await flush();
     await accept(sockets[1]!);
-    expect(account.transactions.getSnapshot().freshness).toBe("fresh");
-    expect(listener).not.toHaveBeenCalled();
+    expect(client.connection.getSnapshot()).toEqual({ isAlive: false, isRecovering: false });
+    expect(account.transactions.getSnapshot().status).toBe("success");
+    expect(account.transactions.getSnapshot().isStale).toBe(true);
+
+    clock.advanceBy(2_500);
+    sockets[1]!.receive(sockets[1]!.sent.at(-1)!);
+    await flush();
+    expect(account.transactions.getSnapshot().isStale).toBe(false);
+    const recoveryReads = subscriptions(sockets[1]!).slice(3);
+    expect(recoveryReads.map((request) => request.payload.type).sort()).toEqual([
+      "availableCash",
+      "cash",
+      "timelineTransactions",
+    ]);
+    for (const request of recoveryReads) {
+      const value =
+        request.payload.type === "timelineTransactions" ? { items: [], cursors: {} } : [];
+      sockets[1]!.receive(snapshot(request.id, value));
+    }
+    await flush();
+
+    clock.advanceBy(2_500);
+    sockets[1]!.receive(sockets[1]!.sent.at(-1)!);
+    await flush();
+    expect(subscriptions(sockets[1]!)).toHaveLength(6);
+    expect(listener).toHaveBeenCalled();
     account.stop();
+  });
+
+  test("keeps data on Session rejection and clears it on Logout", async () => {
+    let readCount = 0;
+    const fetch = vi.fn<Fetch>(async () => {
+      readCount += 1;
+      return readCount === 1 ? documentResponse() : new Response(undefined, { status: 401 });
+    });
+    const { account, client, socket } = setup(fetch);
+    await completeInitialSync(account, socket);
+    const cash = account.cash.getSnapshot();
+    const transactions = account.transactions.getSnapshot();
+    const documents = account.documents.getSnapshot();
+
+    await expect(client.refresh()).rejects.toThrow();
+    expect(client.session.getSnapshot().validity).toBe("rejected");
+    expect(account.cash.getSnapshot()).toBe(cash);
+    expect(account.transactions.getSnapshot()).toBe(transactions);
+    expect(account.documents.getSnapshot()).toBe(documents);
+
+    client.logout();
+    expect(account.cash.getSnapshot()).toMatchObject({ status: "pending", data: undefined });
+    expect(account.transactions.getSnapshot()).toMatchObject({
+      status: "pending",
+      data: undefined,
+    });
+    expect(account.documents.getSnapshot()).toMatchObject({ status: "pending", data: undefined });
   });
 
   test("aborting a repeated Sync leaves its existing Watches active", async () => {
@@ -623,8 +705,8 @@ describe("TRAccount", () => {
     );
     await flush();
     expect(account.transactions.getSnapshot()).toMatchObject({
-      freshness: "fresh",
-      value: [{ id: "still-live" }],
+      status: "success",
+      data: [{ id: "still-live" }],
     });
   });
 
@@ -648,10 +730,10 @@ describe("TRAccount", () => {
     );
 
     await expect(reading).resolves.toMatchObject([{ id: "refreshed" }]);
-    expect(account.transactions.getSnapshot().freshness).toBe("fresh");
+    expect(account.transactions.getSnapshot().status).toBe("success");
   });
 
-  test("downloads no document and keeps the React entry point empty", async () => {
+  test("downloads no document and keeps React bindings out of the root entry point", async () => {
     const fetch = vi.fn<Fetch>(async () => documentResponse());
     const { account, socket } = setup(fetch);
     await completeInitialSync(account, socket);
@@ -663,6 +745,23 @@ describe("TRAccount", () => {
     const root = await import("../src/index.ts");
     const react = await import("../src/react.ts");
     expect(root.TRAccount).toBe(TRAccount);
-    expect(Object.keys(react)).toEqual([]);
+    expect(Object.keys(react).sort()).toEqual(
+      [
+        "TRProvider",
+        "useAccountSlice",
+        "useCash",
+        "useConnection",
+        "useDocuments",
+        "useGet",
+        "useLogin",
+        "useSession",
+        "useSync",
+        "useTRAccount",
+        "useTRClient",
+        "useTransactionRange",
+        "useTransactions",
+        "useWatch",
+      ].sort(),
+    );
   });
 });

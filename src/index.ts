@@ -11,6 +11,7 @@ export {
 } from "./errors.ts";
 export {
   TRClient,
+  type ClientStateStore,
   type GetOptions,
   type GetTimelineTransactionsOptions,
   type ResourceAccessor,
@@ -23,17 +24,18 @@ export {
   type AccountCashBalance,
   type AccountDocument,
   type AccountSlice,
-  type Freshness,
+  type AccountQuery,
   type MaterializedRange,
   type Money,
-  type SliceSnapshot,
+  type TRQuery,
   type Transaction,
   type TransactionRange,
   type TransactionSlice,
-  type TransactionSnapshot,
+  type TransactionQuery,
   type TRAccountOptions,
 } from "./account.ts";
-export { type LoginOptions, type SessionValidity } from "./session.ts";
+export { type LoginOptions, type SessionSnapshot, type SessionValidity } from "./session.ts";
+export { type ConnectionSnapshot } from "./connection.ts";
 export { applyDelta } from "./protocol.ts";
 export {
   AccountPairsResponseSchema,

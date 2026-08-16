@@ -110,14 +110,14 @@ describe("live account audit report", () => {
     const report = createLiveReport((line) => lines.push(line));
 
     report.accountSlice("transactions", {
-      freshness: "fresh",
+      status: "success",
       items: 2,
       from: "2026-01-01T00:00:00.000Z",
       to: "2026-01-08T00:00:00.000Z",
     });
 
     expect(lines).toEqual([
-      "TRAccount.transactions: fresh (2 items) (2026-01-01T00:00:00.000Z to 2026-01-08T00:00:00.000Z)",
+      "TRAccount.transactions: success (2 items) (2026-01-01T00:00:00.000Z to 2026-01-08T00:00:00.000Z)",
     ]);
   });
 });

@@ -1,6 +1,9 @@
 import { defineConfig } from "vite-plus";
 
 export default defineConfig({
+  test: {
+    environment: "jsdom",
+  },
   staged: {
     "*": "vp check --fix",
   },

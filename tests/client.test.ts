@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vite-plus/test";
+import { describe, expect, test, vi } from "vite-plus/test";
 import {
   TRAbortError,
   TRClient,
@@ -10,6 +10,7 @@ import {
   type TickerResponse,
 } from "../src/index.ts";
 import { FakeClock, FakeSocket } from "../src/testing.ts";
+import { accountClientSubscriptionCount } from "../src/client.ts";
 import { topicNames } from "../src/topics.ts";
 
 const instrumentId = "IE00B7Y34M31.LSX";
@@ -191,9 +192,14 @@ describe("TRClient public Topics", () => {
     const socket = new FakeSocket(clock);
     const client = createTestClient({ clock, socket: () => socket });
     const result = client.ticker.get({ id: instrumentId });
+    const initial = client.connection.getSnapshot();
+    const listener = vi.fn();
+    const unsubscribe = client.connection.subscribe(listener);
     await acceptConnection(socket);
 
     expect(client.isAlive).toBe(false);
+    expect(client.connection.getSnapshot()).toBe(initial);
+    expect(client.connection.getSnapshot()).toEqual({ isAlive: false, isRecovering: false });
     clock.advanceBy(2_499);
     expect(socket.sent.some((line) => line.startsWith("echo "))).toBe(false);
     clock.advanceBy(1);
@@ -202,6 +208,13 @@ describe("TRClient public Topics", () => {
 
     socket.receive("echo 3500");
     expect(client.isAlive).toBe(true);
+    expect(client.connection.getSnapshot()).toEqual({ isAlive: true, isRecovering: false });
+    expect(Object.isFrozen(client.connection.getSnapshot())).toBe(true);
+    expect(listener).toHaveBeenCalledTimes(1);
+    socket.receive("echo 3500");
+    expect(listener).toHaveBeenCalledTimes(1);
+    unsubscribe();
+    unsubscribe();
 
     const [requestId] = subscriptionIds(socket);
     socket.receive(snapshotFrame(requestId!, ticker("4")));
@@ -308,7 +321,7 @@ describe("TRClient public Topics", () => {
 });
 
 describe("Topic Watches", () => {
-  test("yields Snapshots, keeps only the newest pending value, and unsubscribes on return", async () => {
+  test("yields every Snapshot in order and unsubscribes on return", async () => {
     const socket = new FakeSocket();
     const client = createTestClient({ socket: () => socket });
     const iterator = client.ticker.watch({ id: instrumentId })[Symbol.asyncIterator]();
@@ -322,10 +335,28 @@ describe("Topic Watches", () => {
     const next = iterator.next();
     socket.receive(snapshotFrame(requestId!, ticker("2")));
     socket.receive(snapshotFrame(requestId!, ticker("3")));
-    await expect(next).resolves.toEqual({ done: false, value: ticker("3") });
+    await expect(next).resolves.toEqual({ done: false, value: ticker("2") });
+    await expect(iterator.next()).resolves.toEqual({ done: false, value: ticker("3") });
 
     await iterator.return?.();
     expect(socket.sent).toContain(`unsub ${requestId}`);
+  });
+
+  test("does not count a Subscription whose socket send fails", async () => {
+    class FailingSubscriptionSocket extends FakeSocket {
+      override send(data: string): void {
+        if (data.startsWith("sub ")) throw new Error("send failed");
+        super.send(data);
+      }
+    }
+
+    const socket = new FailingSubscriptionSocket();
+    const client = createTestClient({ socket: () => socket });
+    const result = client.ticker.get({ id: instrumentId });
+    await acceptConnection(socket);
+
+    await expect(result).rejects.toBeInstanceOf(TRConnectionError);
+    expect(accountClientSubscriptionCount(client)).toBe(0);
   });
 
   test("applies Deltas before yielding", async () => {
@@ -454,7 +485,7 @@ describe("Topic Watches", () => {
     await iterator.return?.();
   });
 
-  test("does not yield a queued pre-drop Snapshot after recovery", async () => {
+  test("yields a queued pre-drop Snapshot after recovery", async () => {
     const clock = new FakeClock();
     const sockets: FakeSocket[] = [];
     const client = createTestClient({
@@ -476,13 +507,8 @@ describe("Topic Watches", () => {
     clock.advanceBy(1_000);
     await acceptConnection(sockets[1]!);
 
+    await expect(iterator.next()).resolves.toEqual({ done: false, value: ticker("stale") });
     const next = iterator.next();
-    let settled = false;
-    void next.then(() => {
-      settled = true;
-    });
-    await flush();
-    expect(settled).toBe(false);
     sockets[1]!.receive(snapshotFrame(requestId!, ticker("fresh")));
     await expect(next).resolves.toEqual({ done: false, value: ticker("fresh") });
     await iterator.return?.();

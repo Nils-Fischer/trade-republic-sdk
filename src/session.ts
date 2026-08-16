@@ -38,6 +38,7 @@ export interface LoginOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
   pollIntervalMs?: number;
+  onApprovalPending?: () => void;
 }
 
 export interface GetOptions {
@@ -48,6 +49,8 @@ export interface GetOptions {
 export interface Session {
   readonly validity: SessionValidity;
   readonly cookieHeader: string | undefined;
+  getSnapshot(): SessionSnapshot;
+  subscribe(onChange: () => void): () => void;
   login(phoneNumber: string, pin: string, options?: LoginOptions): Promise<void>;
   refresh(): Promise<void>;
   markRejected(cause?: unknown): TRAuthError;
@@ -55,6 +58,11 @@ export interface Session {
   get(path: string, options?: GetOptions): Promise<Response>;
   export(): string | undefined;
   logout(): void;
+}
+
+export interface SessionSnapshot {
+  readonly validity: SessionValidity;
+  readonly revision: number;
 }
 
 interface RequestOptions {
@@ -83,6 +91,15 @@ function cookieName(cookie: string): string {
 
 function cookiePair(cookie: string): string {
   return cookie.split(";", 1)[0]?.trim() ?? "";
+}
+
+function cookieHeader(cookies: readonly string[]): string {
+  const pairs: string[] = [];
+  for (const cookie of cookies) {
+    const pair = cookiePair(cookie);
+    if (pair) pairs.push(pair);
+  }
+  return pairs.join("; ");
 }
 
 function hasCookieValue(cookies: readonly string[], name: string): boolean {
@@ -206,7 +223,15 @@ export function createSession(environment: ResolvedEnvironment, serialized?: str
   let refreshPromise: Promise<void> | undefined;
   let refreshRetryMs = INITIAL_REFRESH_RETRY_MS;
   let revision = 0;
+  let sessionSnapshot: SessionSnapshot = Object.freeze({ validity, revision });
+  const listeners = new Set<() => void>();
   const deviceInfoHeader = environment.deviceInfo;
+
+  const publish = (): void => {
+    if (sessionSnapshot.validity === validity && sessionSnapshot.revision === revision) return;
+    sessionSnapshot = Object.freeze({ validity, revision });
+    for (const listener of Array.from(listeners)) listener();
+  };
 
   const clearRefreshTimer = (): void => {
     if (refreshTimer === undefined) return;
@@ -217,6 +242,7 @@ export function createSession(environment: ResolvedEnvironment, serialized?: str
   const markRejected = (cause?: unknown): TRAuthError => {
     clearRefreshTimer();
     validity = cookies.length > 0 ? "rejected" : "absent";
+    publish();
     return new TRAuthError("Trade Republic rejected the Session", { cause });
   };
 
@@ -229,7 +255,7 @@ export function createSession(environment: ResolvedEnvironment, serialized?: str
       "X-TR-Device-Info": deviceInfoHeader,
       "X-TR-Platform": "web-pro",
     };
-    const cookie = options.cookies?.map(cookiePair).filter(Boolean).join("; ");
+    const cookie = options.cookies ? cookieHeader(options.cookies) : undefined;
     const headers = cookie ? { ...baseHeaders, Cookie: cookie } : baseHeaders;
 
     let response: Response;
@@ -317,10 +343,12 @@ export function createSession(environment: ResolvedEnvironment, serialized?: str
       throw new TRValidationError("Refresh returned no tr_session cookie");
     }
     const refreshedCookies = mergeCookies(cookies, received);
-    scheduleRefresh(refreshedCookies);
+    scheduleRefresh(refreshedCookies, revision + 1);
     refreshRetryMs = INITIAL_REFRESH_RETRY_MS;
+    revision += 1;
     cookies = refreshedCookies;
     validity = "presumed-valid";
+    publish();
   };
 
   const refresh = (): Promise<void> => {
@@ -421,6 +449,7 @@ export function createSession(environment: ResolvedEnvironment, serialized?: str
     pollIntervalMs: number,
     signal: AbortSignal,
     sessionRevision: number,
+    onApprovalPending?: () => void,
   ): Promise<void> => {
     const initial = await request({
       method: "POST",
@@ -434,6 +463,8 @@ export function createSession(environment: ResolvedEnvironment, serialized?: str
       (value) => validate(loginResponseSchema, value, "Login response"),
       { onInvalidJson: "throw", errorMessage: "Trade Republic returned invalid JSON" },
     );
+    if (signal.aborted) throw loginCancellation(signal);
+    onApprovalPending?.();
     let receivedLoginCookies = responseCookies(initial);
     let pendingCookies = mergeCookies(cookies, receivedLoginCookies);
 
@@ -469,6 +500,7 @@ export function createSession(environment: ResolvedEnvironment, serialized?: str
         refreshRetryMs = INITIAL_REFRESH_RETRY_MS;
         cookies = pendingCookies;
         validity = "presumed-valid";
+        publish();
         return;
       }
       if (status.status !== "PENDING") {
@@ -514,6 +546,7 @@ export function createSession(environment: ResolvedEnvironment, serialized?: str
       pollIntervalMs,
       controller.signal,
       sessionRevision,
+      options.onApprovalPending,
     ).finally(() => {
       environment.clock.clearTimeout(timeout);
       options.signal?.removeEventListener("abort", abort);
@@ -540,6 +573,7 @@ export function createSession(environment: ResolvedEnvironment, serialized?: str
     refreshRetryMs = INITIAL_REFRESH_RETRY_MS;
     cookies = restoredCookies;
     validity = "presumed-valid";
+    publish();
   };
 
   if (serialized !== undefined) restore(serialized);
@@ -550,7 +584,17 @@ export function createSession(environment: ResolvedEnvironment, serialized?: str
     },
     get cookieHeader() {
       if (validity !== "presumed-valid") return undefined;
-      return cookies.map(cookiePair).filter(Boolean).join("; ");
+      return cookieHeader(cookies);
+    },
+    getSnapshot: () => sessionSnapshot,
+    subscribe: (onChange) => {
+      listeners.add(onChange);
+      let active = true;
+      return () => {
+        if (!active) return;
+        active = false;
+        listeners.delete(onChange);
+      };
     },
     login,
     refresh,
@@ -571,6 +615,7 @@ export function createSession(environment: ResolvedEnvironment, serialized?: str
       refreshRetryMs = INITIAL_REFRESH_RETRY_MS;
       cookies = [];
       validity = "absent";
+      publish();
     },
   };
 }
