@@ -18,6 +18,11 @@ A locally held, read-only projection over the Banking Topics, built on a TRClien
 Window of history current so callers can read it as ordinary async functions.
 _Avoid_: store, cache, repository, model
 
+**Account Slice**:
+One independently readable part of TRAccount — cash, transactions, documents. Each fails and
+updates on its own, so a moving balance never disturbs a transaction list.
+_Avoid_: section, segment, partition, selector
+
 ### Wire
 
 **Topic**:
@@ -75,9 +80,15 @@ Reading a Topic continuously until the caller stops. Every Topic supports it; ho
 updates actually arrive is Trade Republic's business, not something the SDK declares.
 _Avoid_: subscribe, listen, observe, stream
 
+**TRQuery**:
+The result of any read — an Account Slice, a Topic, or a Resource. Reports whether a value has
+been obtained and carries the last one known, so every read in the SDK is read the same way.
+_Avoid_: query result, response, snapshot, state
+
 **Freshness**:
-How current a locally held value is — distinct from Session Validity, which is about
-credentials. A value can be stale while the Session is fine, and vice versa.
+Whether a held value is still being kept current. Derived from the connection's liveness rather
+than stored on the value, and independent of Session Validity — a value falls behind when the
+socket drops, not when credentials lapse.
 _Avoid_: up to date, outdated, dirty, valid
 
 **Window**:
