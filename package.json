@@ -34,6 +34,7 @@
     "test:live": "bun tests/live/account.ts",
     "test:live:tr-account": "bun tests/live/tr-account.ts",
     "check": "vp check",
+    "release": "bumpp",
     "prepublishOnly": "vp run build",
     "prepare": "vp config"
   },

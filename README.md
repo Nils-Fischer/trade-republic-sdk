@@ -197,6 +197,24 @@ It prompts for the phone number and PIN without echo, then waits for approval in
 keeps credentials, the Session, and responses in memory, and prints only accessor status,
 counts, and normalized schema paths. It is not part of `vp test` or CI.
 
+## Releasing
+
+Run the one-time setup wizard to configure npm Trusted Publishing:
+
+```bash
+./scripts/setup-release.sh
+```
+
+For each release, choose the next semantic version, create the tag, and push it:
+
+```bash
+vp run release
+git push --follow-tags
+```
+
+GitHub Actions then runs `vp check`, `vp test`, and `vp pack`, and publishes the tagged package
+to npm with provenance. The release workflow uses npm only for the registry upload.
+
 ## License
 
 [MIT](./LICENSE)

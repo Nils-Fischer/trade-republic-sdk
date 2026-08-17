@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Set up Vite+
+        uses: voidzero-dev/setup-vp@v1.17.0
+        with:
+          node-version: "24"
+          cache: true
+
+      - name: Install dependencies
+        run: vp install
+
+      - name: Check formatting and types
+        run: vp check
+
+      - name: Run tests
+        run: vp test
+
+      - name: Build package with Vite+
+        run: vp pack
+
+      - name: Verify tag matches package version
+        run: |
+          package_version="v$(node -p "JSON.parse(require('fs').readFileSync('package.json', 'utf8')).version")"
+          test "$package_version" = "$GITHUB_REF_NAME"
+
+      - name: Publish to npm
+        # npm checks devEngines before publishing. This project deliberately
+        # uses Bun through Vite+, so force only bypasses that local mismatch;
+        # the package was already checked and packed by Vite+ above.
+        run: npm publish --ignore-scripts --force
