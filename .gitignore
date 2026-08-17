@@ -9,3 +9,8 @@ dist
 !.env.example
 
 .scratch/
+
+# Local project context and docs
+docs/
+.context.md
+CONTEXT.md
