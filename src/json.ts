@@ -4,6 +4,12 @@ interface JsonDecoder<Input, Output> {
   (value: Input): Output;
 }
 
+interface ResponseLike {
+  text(): Promise<string>;
+}
+
+type JsonSource = string | Response | ResponseLike;
+
 interface ThrowInvalidJson {
   onInvalidJson: "throw";
   errorMessage: string;
@@ -24,16 +30,16 @@ export function parseJson<Input, Output, Options extends JsonOptions>(
   options: Options,
 ): JsonResult<Output, Options>;
 export function parseJson<Input, Output, Options extends JsonOptions>(
-  source: Response,
+  source: Response | ResponseLike,
   decode: JsonDecoder<Input, Output>,
   options: Options,
 ): Promise<JsonResult<Output, Options>>;
 export function parseJson<Input, Output>(
-  source: string | Response,
+  source: JsonSource,
   decode: JsonDecoder<Input, Output>,
   options: JsonOptions,
 ): Output | undefined | Promise<Output | undefined> {
-  if (source instanceof Response) {
+  if (source instanceof Response || isResponseLike(source)) {
     return source.text().then(
       (text) => parseJson(text, decode, options),
       (cause: unknown) => {
@@ -55,4 +61,11 @@ export function parseJson<Input, Output>(
     return undefined;
   }
   return decode(value);
+}
+
+function isResponseLike(source: JsonSource): source is ResponseLike {
+  if (!(source instanceof Object) || source instanceof Response || !("text" in source))
+    return false;
+  // oxlint-disable-next-line anti-slop/no-runtime-typeof -- React Native may provide a Response without the global Response brand.
+  return typeof source.text === "function";
 }
