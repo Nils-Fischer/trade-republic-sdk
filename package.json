@@ -1,6 +1,6 @@
 {
   "name": "trade-republic-sdk",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Unofficial TypeScript SDK for the Trade Republic private API.",
   "homepage": "https://github.com/Nils-Fischer/trade-republic-sdk#readme",
   "bugs": {
