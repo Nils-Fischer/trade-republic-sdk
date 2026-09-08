@@ -206,6 +206,18 @@ describe("TRAccount", () => {
     expect(Object.isFrozen(account.transactions.getSnapshot().data?.[0]?.amount)).toBe(true);
   });
 
+  test("accepts timeline transactions that omit subAmount", async () => {
+    const { account, socket } = setup();
+    const item = transaction("without-sub-amount", "2026-01-05T00:00:00.000Z");
+    delete item.subAmount;
+
+    await completeInitialSync(account, socket, [item], []);
+
+    expect(account.transactions.getSnapshot().data).toMatchObject([
+      { id: "without-sub-amount", subAmount: null },
+    ]);
+  });
+
   test("keeps Snapshot identity for repeats, reads covered ranges locally, and stops", async () => {
     const { account, socket } = setup();
     const item = transaction("transaction-1", "2026-01-05T00:00:00.000Z");

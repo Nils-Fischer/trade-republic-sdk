@@ -242,7 +242,7 @@ export const TimelineTransactionSchema = type({
   badge: "string | null",
   "subtitle?": "string | null",
   amount: TimelineTransactionAmountSchema,
-  subAmount: TimelineTransactionAmountSchema.or("null"),
+  "subAmount?": TimelineTransactionAmountSchema.or("null"),
   status: "string",
   action: { type: "string", payload: "string" },
   eventType: "string",
