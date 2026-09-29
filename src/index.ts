@@ -38,10 +38,12 @@ export { type LoginOptions, type SessionSnapshot, type SessionValidity } from ".
 export { type ConnectionSnapshot } from "./connection.ts";
 export { applyDelta } from "./protocol.ts";
 export {
+  isTimelineMerchantLogo,
   timelineEventKind,
   timelineIconUrl,
   timelineMerchantCategory,
   type TimelineEventKind,
+  type TimelineMerchantCategory,
 } from "./timeline.ts";
 export {
   AccountPairsResponseSchema,

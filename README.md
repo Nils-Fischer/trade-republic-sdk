@@ -106,14 +106,22 @@ normalized to integer minor units.
 Timeline rows carry Trade Republic's raw `eventType` and `icon`. Three pure helpers read them:
 
 ```ts
-import { timelineEventKind, timelineIconUrl, timelineMerchantCategory } from "trade-republic-sdk";
+import {
+  isTimelineMerchantLogo,
+  timelineEventKind,
+  timelineIconUrl,
+  timelineMerchantCategory,
+} from "trade-republic-sdk";
 
 timelineEventKind("CARD_TRANSACTION"); // "cardPayment"; "unknown" for a type not yet mapped
 timelineMerchantCategory("logos/merchant-fallback-restaurants/v2"); // "restaurants"
+isTimelineMerchantLogo(row.icon); // true only for a merchant's own logo
 timelineIconUrl(row.icon, "dark"); // public SVG or PNG, no Session needed
 ```
 
-The event map follows pytr's, which covers old and new timeline formats. A merchant without a
+The event map follows pytr's, which covers old and new timeline formats. A top-up of the
+customer's own money (`topUp`) is kept apart from an incoming transfer (`transferIn`), and events
+that move no money are `notice`. A merchant without a
 logo gets a fallback icon that names its card-network category; a merchant with a logo gets
 none.
 
