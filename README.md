@@ -182,6 +182,10 @@ try {
 
 A Topic Error rejects one Subscription while the connection stays healthy.
 
+A `TRHttpError` keeps Trade Republic's answer: `status`, `errorCode` from the first entry of its
+`errors` list, and `body` (the first 2,000 characters). A 401 or 403 from a REST resource marks the
+Session rejected.
+
 ## Validation
 
 Responses are validated against ArkType schemas. The default mode is `warn`: schema drift is
@@ -201,6 +205,12 @@ Node, Bun, and React Native. In browsers, Session export and Refresh scheduling 
 cookie-capable transport, because browser `fetch` hides `HttpOnly` cookies. Inject `fetch`,
 `socket`, and `clock` through `TRClientOptions`; `trade-republic-sdk/testing` provides
 `FakeClock` and `FakeSocket`.
+
+When the SDK holds Session cookies it sends them in its own `Cookie` header with
+`credentials: "omit"`. React Native's iOS networking would otherwise merge its native cookie store
+into that header and Trade Republic would answer HTTP 400. Without SDK cookies, requests use
+`credentials: "include"`, so a browser still sends its own cookie jar; restoring an exported
+Session that carries cookies in a browser is therefore not supported.
 
 ## Development
 
