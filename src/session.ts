@@ -27,6 +27,10 @@ const sessionDataSchema = type({
   version: "1",
   cookies: "string[]",
 });
+const errorBodySchema = type({
+  errors: type({ "errorCode?": "string", "errorMessage?": "string | null" }).array(),
+});
+const MAX_ERROR_BODY_LENGTH = 2_000;
 const jwtClaimsSchema = type({
   iat: "number",
   exp: "number",
@@ -216,6 +220,34 @@ function loginCancellation(signal?: AbortSignal): TRAbortError | TRTimeoutError 
     : new TRAbortError("Login was aborted", { cause: signal?.reason });
 }
 
+async function readErrorBody(response: Response): Promise<string | undefined> {
+  try {
+    const body = await response.text();
+    return body === "" ? undefined : body.slice(0, MAX_ERROR_BODY_LENGTH);
+  } catch {
+    return undefined;
+  }
+}
+
+async function httpError(response: Response): Promise<TRHttpError> {
+  const body = await readErrorBody(response);
+  const detail =
+    body === undefined
+      ? undefined
+      : parseJson(
+          body,
+          (value) => {
+            const parsed = errorBodySchema(value);
+            return parsed instanceof type.errors ? undefined : parsed.errors[0];
+          },
+          { onInvalidJson: "ignore" },
+        );
+  const errorCode = detail?.errorCode;
+  const reason = [errorCode, detail?.errorMessage].filter(Boolean).join(": ");
+  const message = `Trade Republic returned HTTP ${response.status}${reason ? ` (${reason})` : ""}`;
+  return new TRHttpError(response.status, message, { body, errorCode });
+}
+
 export function createSession(environment: ResolvedEnvironment, serialized?: string): Session {
   let cookies: string[] = [];
   let validity: SessionValidity = "absent";
@@ -264,7 +296,11 @@ export function createSession(environment: ResolvedEnvironment, serialized?: str
         method: options.method,
         headers,
         body: options.body ? JSON.stringify(options.body) : undefined,
-        credentials: "include",
+        // The SDK owns the cookies it sends. React Native's iOS networking merges its native
+        // cookie jar into any request with credentials, and appends a manual Cookie header to
+        // the jar's with a comma, which Trade Republic rejects with HTTP 400. Only a request
+        // without SDK cookies lets the runtime's jar supply them, which browsers need.
+        credentials: cookie ? "omit" : "include",
         signal: options.signal,
       });
     } catch (cause) {
@@ -281,7 +317,7 @@ export function createSession(environment: ResolvedEnvironment, serialized?: str
       }
       throw markRejected(response);
     }
-    throw new TRHttpError(response.status, `Trade Republic returned HTTP ${response.status}`);
+    throw await httpError(response);
   };
 
   const scheduleRefresh = (

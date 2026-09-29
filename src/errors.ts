@@ -13,13 +13,24 @@ export class TRError extends Error {
 /** Trade Republic rejected or could not establish a Session. */
 export class TRAuthError extends TRError {}
 
+export interface TRHttpErrorOptions extends TRErrorOptions {
+  /** The response body as Trade Republic sent it, truncated. */
+  body?: string;
+  /** The first `errors[].errorCode` in a Trade Republic JSON error body. */
+  errorCode?: string;
+}
+
 /** A Trade Republic HTTP resource returned an unsuccessful status. */
 export class TRHttpError extends TRError {
   readonly status: number;
+  readonly body?: string;
+  readonly errorCode?: string;
 
-  constructor(status: number, message: string, options?: TRErrorOptions) {
+  constructor(status: number, message: string, options?: TRHttpErrorOptions) {
     super(message, options);
     this.status = status;
+    this.body = options?.body;
+    this.errorCode = options?.errorCode;
   }
 }
 

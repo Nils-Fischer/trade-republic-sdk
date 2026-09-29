@@ -8,6 +8,7 @@ export {
   TRTopicError,
   TRValidationError,
   type TRErrorOptions,
+  type TRHttpErrorOptions,
 } from "./errors.ts";
 export {
   TRClient,

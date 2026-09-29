@@ -68,7 +68,7 @@ async function acceptConnection(socket: FakeSocket): Promise<void> {
 }
 
 async function flush(): Promise<void> {
-  for (let count = 0; count < 8; count += 1) await Promise.resolve();
+  for (let count = 0; count < 16; count += 1) await Promise.resolve();
 }
 
 async function flushUntil(condition: () => boolean): Promise<void> {

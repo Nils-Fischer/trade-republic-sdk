@@ -198,7 +198,7 @@ describe("account resources", () => {
     await expect(client.taxInformation.get()).resolves.toEqual(taxInformation);
     const [url, options] = vi.mocked(fetch).mock.calls[0]!;
     expect(url).toBe("https://api.traderepublic.com/api/v1/taxes/information");
-    expect(options).toMatchObject({ method: "GET", credentials: "include" });
+    expect(options).toMatchObject({ method: "GET", credentials: "omit" });
     expect(options?.headers).toMatchObject({
       Accept: "application/json, text/plain, */*",
       "Accept-Language": "en",
@@ -207,6 +207,50 @@ describe("account resources", () => {
       "X-TR-Device-Info": expect.any(String),
       "X-TR-Platform": "web-pro",
       Cookie: expect.stringMatching(/^tr_session=.*; tr_refresh=.*; mapper-lb-affinity=mapper$/),
+    });
+  });
+
+  test("keeps a native cookie jar from corrupting the Session cookie header", async () => {
+    // React Native on iOS reads its shared cookie jar for credentialed requests and appends a
+    // manual Cookie header to the jar's value with a comma.
+    const jarCookie = "tr_session=stale-from-native-jar";
+    const fetch = vi.fn<Fetch>(async (_input, init) => {
+      const manual = new Headers(init?.headers).get("Cookie");
+      const sent = init?.credentials === "omit" ? manual : `${jarCookie},${manual}`;
+      return sent?.startsWith("tr_session=ey")
+        ? response(accountInfoWithAddressAddendum())
+        : response({ errors: [{ errorCode: "BAD_REQUEST" }] }, 400);
+    });
+    const client = authenticatedClient({ fetch });
+
+    await expect(client.accountInfo.get()).resolves.toEqual(accountInfoWithAddressAddendum());
+  });
+
+  test("keeps Trade Republic's error body and code on an HTTP error", async () => {
+    const body = { errors: [{ errorCode: "INVALID_REQUEST", errorMessage: "Bad cookie" }] };
+    const client = authenticatedClient({ fetch: vi.fn<Fetch>(async () => response(body, 400)) });
+
+    const error: unknown = await client.personalDetails.get().catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(TRHttpError);
+    expect(error).toMatchObject({
+      status: 400,
+      errorCode: "INVALID_REQUEST",
+      body: JSON.stringify(body),
+      message: "Trade Republic returned HTTP 400 (INVALID_REQUEST: Bad cookie)",
+    });
+  });
+
+  test("keeps a non-JSON error body without an error code", async () => {
+    const client = authenticatedClient({
+      fetch: vi.fn<Fetch>(async () => new Response("<html>WAF</html>", { status: 400 })),
+    });
+
+    const error: unknown = await client.accountInfo.get().catch((cause: unknown) => cause);
+    expect(error).toMatchObject({
+      status: 400,
+      errorCode: undefined,
+      body: "<html>WAF</html>",
+      message: "Trade Republic returned HTTP 400",
     });
   });
 
