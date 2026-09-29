@@ -101,6 +101,22 @@ never disturbs a transaction list. Transactions track a **Materialized Range** r
 count, which keeps "no transactions in March" distinct from "March was never fetched". Money is
 normalized to integer minor units.
 
+### Timeline rows
+
+Timeline rows carry Trade Republic's raw `eventType` and `icon`. Three pure helpers read them:
+
+```ts
+import { timelineEventKind, timelineIconUrl, timelineMerchantCategory } from "trade-republic-sdk";
+
+timelineEventKind("CARD_TRANSACTION"); // "cardPayment"; "unknown" for a type not yet mapped
+timelineMerchantCategory("logos/merchant-fallback-restaurants/v2"); // "restaurants"
+timelineIconUrl(row.icon, "dark"); // public SVG or PNG, no Session needed
+```
+
+The event map follows pytr's, which covers old and new timeline formats. A merchant without a
+logo gets a fallback icon that names its card-network category; a merchant with a logo gets
+none.
+
 ## TRQuery
 
 Every read returns the same shape, so Slices, Topics, and resources are all read the same way.
