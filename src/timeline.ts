@@ -124,6 +124,34 @@ export function timelineEventKind(eventType: string): TimelineEventKind {
 }
 
 /**
+ * What a timeline row's `status` says about its money. A declined, cancelled, or
+ * expired card payment stays a row of its own with `CANCELED`, not `deleted` or
+ * `hidden`, and its subtitle says which of the three it was; a retry that goes
+ * through is a new row. `EXECUTED` and `CANCELED` appear in pytr's timeline
+ * fixtures and in live data. `PENDING` is Trade Republic's word for work not yet
+ * done elsewhere in the API and is not yet confirmed on a timeline row.
+ * `unknown` means a status this list has not met; callers must handle it.
+ */
+export type TimelineStatusKind =
+  /** Money moved, or will move once the row settles. */
+  | "executed"
+  | "pending"
+  /** No money moved. */
+  | "cancelled"
+  | "unknown";
+
+// The detail view spells the same statuses in lowercase, so matching ignores case.
+const statusKinds = new Map<string, TimelineStatusKind>([
+  ["EXECUTED", "executed"],
+  ["PENDING", "pending"],
+  ["CANCELED", "cancelled"],
+]);
+
+export function timelineStatusKind(status: string): TimelineStatusKind {
+  return statusKinds.get(status.toUpperCase()) ?? "unknown";
+}
+
+/**
  * The card-network categories seen in fallback icons. Trade Republic may add
  * more, so any other lowercase name is passed through unchanged.
  */

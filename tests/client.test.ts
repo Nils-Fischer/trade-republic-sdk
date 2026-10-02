@@ -63,7 +63,7 @@ describe("TRClient public Topics", () => {
     topicNames.forEach((name) => expect(client[name]).toBeDefined());
   });
 
-  test("constructs without opening a socket and waits for the server handshake", async () => {
+  test("constructs without opening a socket and pipelines subscriptions behind the handshake", async () => {
     const socket = new FakeSocket();
     let creations = 0;
     const client = createTestClient({
@@ -82,14 +82,14 @@ describe("TRClient public Topics", () => {
 
     expect(creations).toBe(1);
     socket.open();
-    await Promise.resolve();
+    await flush();
     expect(settled).toBe(false);
-    expect(subscriptionIds(socket)).toEqual([]);
-
-    socket.receive("connected");
-    await Promise.resolve();
+    // The subscription follows the handshake frame without waiting for its reply.
+    expect(socket.sent[0]).toMatch(/^connect /);
     const [requestId] = subscriptionIds(socket);
     expect(requestId).toBeDefined();
+
+    socket.receive("connected");
     socket.receive(snapshotFrame(requestId!, ticker("12.34")));
 
     await expect(result).resolves.toEqual(ticker("12.34"));
@@ -187,38 +187,39 @@ describe("TRClient public Topics", () => {
     expect(warningCount).toBe(0);
   });
 
-  test("tracks the fixed Echo as its liveness signal", async () => {
+  test("is alive from the handshake and stays alive while an Echo is out", async () => {
     const clock = new FakeClock(1_000);
     const socket = new FakeSocket(clock);
     const client = createTestClient({ clock, socket: () => socket });
     const result = client.ticker.get({ id: instrumentId });
-    const initial = client.connection.getSnapshot();
+    expect(client.connection.getSnapshot()).toEqual({ isAlive: false, isRecovering: false });
     const listener = vi.fn();
     const unsubscribe = client.connection.subscribe(listener);
     await acceptConnection(socket);
 
-    expect(client.isAlive).toBe(false);
-    expect(client.connection.getSnapshot()).toBe(initial);
-    expect(client.connection.getSnapshot()).toEqual({ isAlive: false, isRecovering: false });
-    clock.advanceBy(2_499);
-    expect(socket.sent.some((line) => line.startsWith("echo "))).toBe(false);
-    clock.advanceBy(1);
-    expect(socket.sent.at(-1)).toBe("echo 3500");
-    expect(client.isAlive).toBe(false);
-
-    socket.receive("echo 3500");
     expect(client.isAlive).toBe(true);
     expect(client.connection.getSnapshot()).toEqual({ isAlive: true, isRecovering: false });
     expect(Object.isFrozen(client.connection.getSnapshot())).toBe(true);
     expect(listener).toHaveBeenCalledTimes(1);
+
+    clock.advanceBy(2_499);
+    expect(socket.sent.some((line) => line.startsWith("echo "))).toBe(false);
+    clock.advanceBy(1);
+    expect(socket.sent.at(-1)).toBe("echo 3500");
+    // An Echo in flight does not publish a liveness change.
+    expect(client.isAlive).toBe(true);
     socket.receive("echo 3500");
     expect(listener).toHaveBeenCalledTimes(1);
-    unsubscribe();
-    unsubscribe();
 
-    const [requestId] = subscriptionIds(socket);
-    socket.receive(snapshotFrame(requestId!, ticker("4")));
-    await result;
+    // An Echo still missing at the next tick loses the transport.
+    clock.advanceBy(2_500);
+    expect(socket.sent.at(-1)).toBe("echo 6000");
+    clock.advanceBy(2_500);
+    expect(client.isAlive).toBe(false);
+    expect(listener).toHaveBeenCalledTimes(2);
+    unsubscribe();
+    unsubscribe();
+    void result.catch(() => undefined);
   });
 
   test("distinguishes aborts and fake-clock timeouts", async () => {
@@ -432,8 +433,6 @@ describe("Topic Watches", () => {
     clock.advanceBy(1_000);
     expect(sockets).toHaveLength(2);
     sockets[1]!.open();
-    expect(subscriptionIds(sockets[1]!)).toEqual([]);
-    sockets[1]!.receive("connected");
     await flush();
 
     expect(subscriptionIds(sockets[1]!)).toEqual([firstId, secondId]);
@@ -540,14 +539,47 @@ describe("Topic Watches", () => {
     void next.then(() => {
       settled = true;
     });
+    await flush();
+    expect(subscriptionIds(sockets[1]!)).toEqual([requestId]);
     sockets[1]!.receive(snapshotFrame(requestId!, ticker("premature")));
     await flush();
     expect(settled).toBe(false);
-    expect(subscriptionIds(sockets[1]!)).toEqual([]);
     sockets[1]!.receive("connected");
     sockets[1]!.receive(snapshotFrame(requestId!, ticker("fresh")));
 
     await expect(next).resolves.toEqual({ done: false, value: ticker("fresh") });
+    await iterator.return?.();
+  });
+
+  test("keeps backing off while the server drops the socket before accepting it", async () => {
+    const clock = new FakeClock();
+    const sockets: FakeSocket[] = [];
+    const client = createTestClient({
+      clock,
+      socket: () => {
+        const socket = new FakeSocket(clock);
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    const iterator = client.ticker.watch({ id: instrumentId })[Symbol.asyncIterator]();
+    const first = iterator.next();
+    await acceptConnection(sockets[0]!);
+    const [requestId] = subscriptionIds(sockets[0]!);
+    sockets[0]!.receive(snapshotFrame(requestId!, ticker("1")));
+    await first;
+
+    sockets[0]!.drop();
+    clock.advanceBy(1_000);
+    sockets[1]!.open();
+    await flush();
+    sockets[1]!.drop();
+    await flush();
+    // Without a "connected" reply the delay grows instead of starting over at 1 s.
+    clock.advanceBy(1_999);
+    expect(sockets).toHaveLength(2);
+    clock.advanceBy(1);
+    expect(sockets).toHaveLength(3);
     await iterator.return?.();
   });
 

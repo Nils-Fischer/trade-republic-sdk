@@ -25,8 +25,12 @@ export {
   type AccountCashBalance,
   type AccountDocument,
   type AccountSlice,
+  type AccountSliceName,
   type AccountQuery,
   type MaterializedRange,
+  type RangeQuery,
+  type TimelineQuery,
+  type TimelineSlice,
   type Money,
   type TRQuery,
   type Transaction,
@@ -41,9 +45,11 @@ export { applyDelta } from "./protocol.ts";
 export {
   isTimelineMerchantLogo,
   timelineEventKind,
+  timelineStatusKind,
   timelineIconUrl,
   timelineMerchantCategory,
   type TimelineEventKind,
+  type TimelineStatusKind,
   type TimelineMerchantCategory,
 } from "./timeline.ts";
 export {

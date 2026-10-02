@@ -84,6 +84,10 @@ export function createConnection(
   let lastEcho: string | undefined;
   let awaitingEcho = false;
   let nextRequestId = 1;
+  // The handshake frame is out, so subscriptions may follow it. Trade Republic
+  // answers frames in order, so pipelining them saves a round trip.
+  let handshakeSent = false;
+  // Trade Republic answered the handshake.
   let connected = false;
   let alive = false;
   let recovering = false;
@@ -139,6 +143,7 @@ export function createConnection(
   };
 
   const abandonTransport = (): void => {
+    handshakeSent = false;
     connected = false;
     setAlive(false);
     clearEcho();
@@ -166,10 +171,11 @@ export function createConnection(
     socket.send(line);
   };
 
+  // The backoff resets only when Trade Republic answers the handshake, so a server
+  // that accepts the socket and then drops it cannot cause a reconnect loop.
   const finishRecovery = (): void => {
     const current = recovery;
     recovery = undefined;
-    recoveryDelayIndex = 0;
     setRecovering(false);
     current?.resolve();
   };
@@ -231,7 +237,7 @@ export function createConnection(
   let beginRecovery: (error: TRConnectionError) => void;
 
   const openTransport = (): Promise<void> => {
-    if (connected) return Promise.resolve();
+    if (handshakeSent) return Promise.resolve();
     if (connectionPromise) return connectionPromise;
 
     const transportGeneration = ++generation;
@@ -274,16 +280,17 @@ export function createConnection(
       };
 
       const sendEcho = (): void => {
-        if (!isCurrent() || !connected) return;
+        if (!isCurrent() || !handshakeSent) return;
         if (awaitingEcho) {
           loseEstablishedTransport(new TRConnectionError("The WebSocket Echo was not returned"));
           return;
         }
 
+        // Liveness stays as it is while an Echo is out. An Echo still missing at the
+        // next tick loses the transport, which is what marks the connection not alive.
         const echo = `echo ${environment.clock.now()}`;
         lastEcho = echo;
         awaitingEcho = true;
-        setAlive(false);
         try {
           send(echo);
         } catch (cause) {
@@ -298,7 +305,20 @@ export function createConnection(
           echoTimer = environment.clock.setInterval(sendEcho, ECHO_INTERVAL_MS);
         } catch (cause) {
           failHandshake(toConnectionError("Could not send the WebSocket handshake", cause));
+          return;
         }
+        handshakeSent = true;
+        try {
+          restoreSubscriptions();
+        } catch (cause) {
+          loseEstablishedTransport(
+            toConnectionError("Could not restore the Topic subscriptions", cause),
+          );
+          return;
+        }
+        connectionPromise = undefined;
+        rejectConnection = undefined;
+        resolve();
       };
 
       currentSocket.onmessage = ({ data }: SocketMessageEvent) => {
@@ -307,17 +327,8 @@ export function createConnection(
           if (connected) return;
           connected = true;
           recoveryDelayIndex = 0;
-          try {
-            restoreSubscriptions();
-          } catch (cause) {
-            loseEstablishedTransport(
-              toConnectionError("Could not restore the Topic subscriptions", cause),
-            );
-            return;
-          }
-          connectionPromise = undefined;
-          rejectConnection = undefined;
-          resolve();
+          // Trade Republic accepting the handshake proves the transport alive.
+          setAlive(true);
           return;
         }
 
@@ -329,6 +340,8 @@ export function createConnection(
           return;
         }
 
+        // Trade Republic answers in order, so a Topic frame before its "connected"
+        // reply cannot be for this transport's subscriptions.
         if (!connected) return;
         handleFrame(data);
       };
@@ -341,15 +354,16 @@ export function createConnection(
             : "The WebSocket failed before Trade Republic accepted it",
           event.error ?? event,
         );
-        if (connected) loseEstablishedTransport(error);
+        // Once the handshake is out, subscriptions ride on the transport, so its
+        // loss goes through recovery like any other.
+        if (handshakeSent) loseEstablishedTransport(error);
         else failHandshake(error);
       };
 
       currentSocket.onclose = (event: SocketCloseEvent) => {
         if (!isCurrent()) return;
-        const wasConnected = connected;
         const error = new TRConnectionError("The WebSocket connection closed", { cause: event });
-        if (wasConnected) loseEstablishedTransport(error);
+        if (handshakeSent) loseEstablishedTransport(error);
         else failHandshake(error);
       };
     });
@@ -369,7 +383,7 @@ export function createConnection(
       const attemptGeneration = generation;
       void attempt.then(
         () => {
-          if (recovery === currentRecovery && connected && generation === attemptGeneration) {
+          if (recovery === currentRecovery && handshakeSent && generation === attemptGeneration) {
             finishRecovery();
           }
         },
@@ -393,7 +407,7 @@ export function createConnection(
   };
 
   const connect = (): Promise<void> => {
-    if (connected) return Promise.resolve();
+    if (handshakeSent) return Promise.resolve();
     return recovery?.promise ?? openTransport();
   };
 
@@ -437,7 +451,7 @@ export function createConnection(
     sink: SubscriptionSink<Value>,
     recoveryPolicy: SubscriptionRecovery,
   ): SubscriptionControl => {
-    if (!connected) throw new TRConnectionError("The WebSocket is not connected");
+    if (!handshakeSent) throw new TRConnectionError("The WebSocket is not connected");
 
     const requestId = nextRequestId++;
     const serializedPayload = JSON.stringify(payload);
@@ -492,7 +506,7 @@ export function createConnection(
           rejectConnection?.(error);
           abandonTransport();
         }
-        if (!connected) return;
+        if (!handshakeSent) return;
         try {
           send(`unsub ${requestId}`);
         } catch {

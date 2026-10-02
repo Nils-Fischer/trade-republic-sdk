@@ -4,6 +4,7 @@ import {
   timelineEventKind,
   timelineIconUrl,
   timelineMerchantCategory,
+  timelineStatusKind,
 } from "../src/index.ts";
 
 describe("timeline event kinds", () => {
@@ -30,6 +31,23 @@ describe("timeline event kinds", () => {
 
   test("reports an event it has not met as unknown", () => {
     expect(timelineEventKind("SOMETHING_NEW")).toBe("unknown");
+  });
+});
+
+describe("timeline status kinds", () => {
+  test("names a cancelled row, which moved no money", () => {
+    expect(timelineStatusKind("CANCELED")).toBe("cancelled");
+    expect(timelineStatusKind("canceled")).toBe("cancelled");
+  });
+
+  test("names executed and pending rows", () => {
+    expect(timelineStatusKind("EXECUTED")).toBe("executed");
+    expect(timelineStatusKind("executed")).toBe("executed");
+    expect(timelineStatusKind("PENDING")).toBe("pending");
+  });
+
+  test("reports a status it has not met as unknown", () => {
+    expect(timelineStatusKind("SETTLING")).toBe("unknown");
   });
 });
 

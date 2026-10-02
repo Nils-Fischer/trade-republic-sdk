@@ -16,6 +16,8 @@ const REFRESH_PATH = "/api/v1/auth/web/session";
 const DEFAULT_LOGIN_TIMEOUT_MS = 180_000;
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
 const INITIAL_REFRESH_RETRY_MS = 5_000;
+/** A token with less time left than this is refreshed before the next socket or request. */
+const FRESHNESS_MARGIN_MS = 30_000;
 const MAX_REFRESH_RETRY_MS = 60_000;
 
 const loginResponseSchema = type({ processId: "string" });
@@ -57,6 +59,11 @@ export interface Session {
   subscribe(onChange: () => void): () => void;
   login(phoneNumber: string, pin: string, options?: LoginOptions): Promise<void>;
   refresh(): Promise<void>;
+  /**
+   * Refreshes when the session token is about to expire. Returns undefined when
+   * it is fresh, so a caller can carry on in the same tick.
+   */
+  ensureFresh(): Promise<void> | undefined;
   markRejected(cause?: unknown): TRAuthError;
   recover(cause?: unknown): Promise<void>;
   get(path: string, options?: GetOptions): Promise<Response>;
@@ -254,6 +261,7 @@ export function createSession(environment: ResolvedEnvironment, serialized?: str
   let refreshTimer: TimerHandle | undefined;
   let refreshPromise: Promise<void> | undefined;
   let refreshRetryMs = INITIAL_REFRESH_RETRY_MS;
+  let expiresAt: number | undefined;
   let revision = 0;
   let sessionSnapshot: SessionSnapshot = Object.freeze({ validity, revision });
   const listeners = new Set<() => void>();
@@ -328,7 +336,7 @@ export function createSession(environment: ResolvedEnvironment, serialized?: str
     if (!sessionCookie) throw new TRValidationError("The Session has no tr_session cookie");
 
     const claims = decodeClaims(sessionCookie);
-    const expiresAt = claims.exp * 1_000;
+    expiresAt = claims.exp * 1_000;
     const startsAt = claims.iat * 1_000;
     const refreshAt = startsAt + (expiresAt - startsAt) * 0.8;
     clearRefreshTimer();
@@ -396,6 +404,12 @@ export function createSession(environment: ResolvedEnvironment, serialized?: str
     return current;
   };
 
+  const ensureFresh = (): Promise<void> | undefined => {
+    if (validity !== "presumed-valid" || expiresAt === undefined) return undefined;
+    if (expiresAt - environment.clock.now() > FRESHNESS_MARGIN_MS) return undefined;
+    return refresh();
+  };
+
   const recover = async (cause?: unknown): Promise<void> => {
     markRejected(cause);
     await refresh();
@@ -442,6 +456,10 @@ export function createSession(environment: ResolvedEnvironment, serialized?: str
         });
 
       try {
+        // An expired token would earn a 401 and a recovery that briefly marks the
+        // Session rejected; refreshing first avoids both.
+        const refreshing = ensureFresh();
+        if (refreshing) await refreshing;
         return await read();
       } catch (error) {
         if (!(error instanceof TRHttpError) || (error.status !== 401 && error.status !== 403)) {
@@ -634,6 +652,7 @@ export function createSession(environment: ResolvedEnvironment, serialized?: str
     },
     login,
     refresh,
+    ensureFresh,
     markRejected,
     recover,
     get,
@@ -649,6 +668,7 @@ export function createSession(environment: ResolvedEnvironment, serialized?: str
       revision += 1;
       refreshPromise = undefined;
       refreshRetryMs = INITIAL_REFRESH_RETRY_MS;
+      expiresAt = undefined;
       cookies = [];
       validity = "absent";
       publish();

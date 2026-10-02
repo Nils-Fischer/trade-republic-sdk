@@ -88,9 +88,29 @@ export interface MaterializedRange {
   readonly to: string;
 }
 
-export type TransactionQuery = AccountQuery<readonly Transaction[]> & {
+export type RangeQuery<Value> = AccountQuery<Value> & {
   readonly materializedRange: MaterializedRange | undefined;
 };
+
+export type TransactionQuery = RangeQuery<readonly Transaction[]>;
+
+/**
+ * Raw timeline rows in the Window, hidden and deleted rows included, newest first.
+ * Rows arrive page by page and from the Watch; `materializedRange` says how much
+ * of the Window a completed traversal covers.
+ */
+export type TimelineQuery = RangeQuery<readonly TimelineTransaction[]> & {
+  /**
+   * When a traversal of the whole Window last completed. A Watch push moves
+   * `materializedRange.to` but not this, so it marks a finished Sync.
+   */
+  readonly traversedAt: number | undefined;
+};
+
+export interface TimelineSlice {
+  getSnapshot(): TimelineQuery;
+  subscribe(onChange: () => void): () => void;
+}
 
 export interface TransactionSlice {
   getSnapshot(): TransactionQuery;
@@ -104,8 +124,13 @@ export interface TransactionRange {
   readonly signal?: AbortSignal;
 }
 
+export type AccountSliceName = "cash" | "transactions" | "documents";
+
 export interface TRAccountOptions {
-  readonly transactionWindow: { readonly from: Date };
+  /** A function is read again at every Sync, so the Window can follow the app's own state. */
+  readonly transactionWindow: { readonly from: Date | (() => Date) };
+  /** Slices to keep current. Defaults to all; a Slice left out stays pending and costs no I/O. */
+  readonly slices?: readonly AccountSliceName[];
 }
 
 export interface AccountCashBalance {
@@ -155,6 +180,7 @@ type WatchName = "cash" | "availableCash" | "timelineTransactions";
 interface ProjectedTransaction {
   readonly id: string;
   readonly timestamp: number;
+  readonly row: TimelineTransaction;
   readonly value: Transaction | undefined;
 }
 
@@ -242,11 +268,14 @@ class SnapshotStore<Value, Snapshot extends AccountQuery<Value>> {
 export class TRAccount {
   readonly cash: AccountSlice<AccountCash>;
   readonly transactions: TransactionSlice;
+  readonly timeline: TimelineSlice;
   readonly documents: AccountSlice<readonly AccountDocument[]>;
 
   readonly #client: TRClient;
-  readonly #windowFrom: number;
-  readonly #windowFromIso: string;
+  readonly #slices: ReadonlySet<AccountSliceName>;
+  readonly #windowSource: Date | (() => Date);
+  #windowFrom: number;
+  #windowFromIso: string;
   readonly #cashStore = new SnapshotStore<AccountCash, CashQuery>(
     snapshot("pending", undefined, undefined, false),
     (current, error) =>
@@ -254,19 +283,25 @@ export class TRAccount {
     () => snapshot("pending", undefined, undefined, false),
     (current, isStale) => accountQueryWithStaleness(current, isStale),
   );
-  readonly #transactionStore = new SnapshotStore<readonly Transaction[], TransactionQuery>(
-    transactionSnapshot("pending", undefined, undefined, false, undefined),
+  readonly #transactionStore = rangeStore<readonly Transaction[]>();
+  readonly #timelineStore = new SnapshotStore<readonly TimelineTransaction[], TimelineQuery>(
+    withTraversal(rangeSnapshot("pending", undefined, undefined, false, undefined), undefined),
     (current, error) =>
-      transactionSnapshot(
-        "error",
-        current.data,
-        current.dataUpdatedAt,
-        current.isStale,
-        current.materializedRange,
-        error,
+      withTraversal(
+        rangeSnapshot(
+          "error",
+          current.data,
+          current.dataUpdatedAt,
+          current.isStale,
+          current.materializedRange,
+          error,
+        ),
+        current.traversedAt,
       ),
-    () => transactionSnapshot("pending", undefined, undefined, false, undefined),
-    (current, isStale) => transactionQueryWithStaleness(current, isStale),
+    () =>
+      withTraversal(rangeSnapshot("pending", undefined, undefined, false, undefined), undefined),
+    (current, isStale) =>
+      withTraversal(rangeQueryWithStaleness(current, isStale), current.traversedAt),
   );
   readonly #documentStore = new SnapshotStore<readonly AccountDocument[], DocumentQuery>(
     snapshot("pending", undefined, undefined, false),
@@ -277,6 +312,9 @@ export class TRAccount {
   readonly #watchSlots = new Map<WatchName, WatchSlot>();
   readonly #pendingReads = new Set<AbortController>();
   readonly #transactionsById = new Map<string, Transaction>();
+  readonly #rowsById = new Map<string, TimelineTransaction>();
+  #timelineChanged = false;
+  #traversedAt: number | undefined;
   readonly #watchTransactions = new Map<string, WatchedTransaction>();
   #cashBalances: readonly AccountCashBalance[] | undefined;
   #availableBalances: readonly AccountCashBalance[] | undefined;
@@ -292,7 +330,9 @@ export class TRAccount {
 
   constructor(client: TRClient, options: TRAccountOptions) {
     this.#client = client;
-    this.#windowFrom = validDate(options.transactionWindow.from, "transactionWindow.from");
+    this.#slices = new Set(options.slices ?? ["cash", "transactions", "documents"]);
+    this.#windowSource = options.transactionWindow.from;
+    this.#windowFrom = this.#readWindow();
     this.#windowFromIso = new Date(this.#windowFrom).toISOString();
     this.#connectionAlive = client.connection.getSnapshot().isAlive;
 
@@ -304,6 +344,10 @@ export class TRAccount {
       getSnapshot: this.#transactionStore.getSnapshot,
       subscribe: this.#transactionStore.subscribe,
       read: (range: TransactionRange) => this.#readTransactions(range),
+    });
+    this.timeline = Object.freeze({
+      getSnapshot: this.#timelineStore.getSnapshot,
+      subscribe: this.#timelineStore.subscribe,
     });
     this.documents = Object.freeze({
       getSnapshot: this.#documentStore.getSnapshot,
@@ -317,6 +361,11 @@ export class TRAccount {
 
   sync(options: { signal?: AbortSignal } = {}): Promise<void> {
     if (this.#syncPromise) return this.#syncPromise;
+    try {
+      this.#moveWindow();
+    } catch (error) {
+      return Promise.reject(errorFrom(error));
+    }
 
     const controller = new AbortController();
     const context: SyncContext = {
@@ -347,6 +396,30 @@ export class TRAccount {
     this.#clear("TRAccount stopped");
   }
 
+  #readWindow(): number {
+    const source = this.#windowSource;
+    return validDate(source instanceof Date ? source : source(), "transactionWindow.from");
+  }
+
+  /**
+   * A Window that starts later drops the rows before it. One that starts
+   * earlier is not covered until the next traversal completes.
+   */
+  #moveWindow(): void {
+    const from = this.#readWindow();
+    if (from === this.#windowFrom) return;
+    const previous = this.#windowFrom;
+    this.#windowFrom = from;
+    this.#windowFromIso = new Date(from).toISOString();
+    if (from < previous) {
+      this.#materializedTo = undefined;
+      return;
+    }
+    for (const row of this.#rowsById.values()) {
+      if (Date.parse(row.timestamp) < from) this.#removeTransaction(row.id);
+    }
+  }
+
   #clear(reason: string): void {
     this.#token += 1;
     this.#syncController?.abort(reason);
@@ -359,6 +432,9 @@ export class TRAccount {
     this.#cashWatchSeen = { cash: false, availableCash: false };
     this.#watchTransactions.clear();
     this.#transactionsById.clear();
+    this.#rowsById.clear();
+    this.#timelineChanged = false;
+    this.#traversedAt = undefined;
     this.#cashBalances = undefined;
     this.#availableBalances = undefined;
     this.#materializedTo = undefined;
@@ -366,6 +442,7 @@ export class TRAccount {
     this.#recoveryObserved = false;
     this.#cashStore.clear();
     this.#transactionStore.clear();
+    this.#timelineStore.clear();
     this.#documentStore.clear();
   }
 
@@ -376,6 +453,7 @@ export class TRAccount {
     if (connection.isRecovering) this.#recoveryObserved = true;
     this.#cashStore.setStale(!connection.isAlive);
     this.#transactionStore.setStale(!connection.isAlive);
+    this.#timelineStore.setStale(!connection.isAlive);
     if (connection.isAlive && !wasAlive && this.#recoveryObserved && this.#watchSlots.size > 0) {
       this.#recoveryObserved = false;
       void this.sync().catch(() => undefined);
@@ -383,8 +461,12 @@ export class TRAccount {
   }
 
   async #runSync(context: SyncContext): Promise<void> {
-    if (context.controller.signal.aborted)
-      return this.#finishAbortedSync(context, [false, false, false]);
+    const skipped = [
+      !this.#slices.has("cash"),
+      !this.#slices.has("transactions"),
+      !this.#slices.has("documents"),
+    ];
+    if (context.controller.signal.aborted) return this.#finishAbortedSync(context, skipped);
 
     this.#ensureWatches(context);
     const cancelCreatedWatches = (): void => {
@@ -394,35 +476,13 @@ export class TRAccount {
       }
     };
     context.controller.signal.addEventListener("abort", cancelCreatedWatches, { once: true });
-    let cashWork: Promise<void>;
-    let transactionWork: Promise<void>;
-    let documentWork: Promise<void>;
-    if (context.firstMaintenance) {
-      const cashReady = this.#watchReady("cash");
-      const availableCashReady = this.#watchReady("availableCash");
-      const timelineReady = this.#watchReady("timelineTransactions");
-      await Promise.allSettled([cashReady, availableCashReady, timelineReady]);
-      if (context.controller.signal.aborted || context.token !== this.#token) {
-        context.controller.signal.removeEventListener("abort", cancelCreatedWatches);
-        return this.#finishAbortedSync(context, [
-          this.#cashStore.getSnapshot().status === "success",
-          false,
-          false,
-        ]);
-      }
-      cashWork = this.#waitForInitialCash(context, [cashReady, availableCashReady]);
-      transactionWork = this.#refreshTransactions(
-        context,
-        accountClientNow(this.#client),
-        timelineReady,
-      );
-      documentWork = this.#refreshDocuments(context);
-    } else {
-      cashWork = this.#refreshCash(context);
-      transactionWork = this.#refreshTransactionsAfterWatches(context);
-      documentWork = this.#refreshDocuments(context);
-    }
-    const results = await Promise.allSettled([cashWork, transactionWork, documentWork]);
+    // Each Slice runs on its own: history starts as soon as the timeline Watch is
+    // subscribed, without waiting for cash or for the Watch's first value.
+    const results = await Promise.allSettled([
+      skipped[0] ? Promise.resolve() : this.#syncCash(context),
+      skipped[1] ? Promise.resolve() : this.#refreshTransactionsAfterWatch(context),
+      skipped[2] ? Promise.resolve() : this.#refreshDocuments(context),
+    ]);
     context.controller.signal.removeEventListener("abort", cancelCreatedWatches);
     const completed = results.map((result) => result.status === "fulfilled");
 
@@ -435,10 +495,20 @@ export class TRAccount {
     }
   }
 
+  #syncCash(context: SyncContext): Promise<void> {
+    if (!context.firstMaintenance) return this.#refreshCash(context);
+    return this.#waitForInitialCash(context, [
+      this.#watchReady("cash"),
+      this.#watchReady("availableCash"),
+    ]);
+  }
+
   #ensureWatches(context: SyncContext): void {
-    this.#ensureWatch("cash", context);
-    this.#ensureWatch("availableCash", context);
-    this.#ensureWatch("timelineTransactions", context);
+    if (this.#slices.has("cash")) {
+      this.#ensureWatch("cash", context);
+      this.#ensureWatch("availableCash", context);
+    }
+    if (this.#slices.has("transactions")) this.#ensureWatch("timelineTransactions", context);
   }
 
   #watchReady(name: WatchName): Promise<void> {
@@ -547,6 +617,7 @@ export class TRAccount {
       this.#materializedTo = Math.max(this.#materializedTo, receivedAt);
       this.#commitTransactions();
     }
+    this.#commitTimeline();
   }
 
   async #waitForInitialCash(context: SyncContext, ready: readonly Promise<void>[]): Promise<void> {
@@ -601,49 +672,61 @@ export class TRAccount {
     timelineReady?: Promise<void>,
   ): Promise<void> {
     const watchThreshold = context.firstMaintenance ? 0 : context.watchRevision + 1;
+    // A Watch value received since this Sync began is newer than any history page.
+    const watchWins = (id: string): boolean =>
+      (this.#watchTransactions.get(id)?.revision ?? -1) >= watchThreshold;
     try {
       const [historyResult, readyResult] = await Promise.allSettled([
         this.#client.getTimelineTransactions({
           from: new Date(this.#windowFrom),
           to: new Date(upperBound),
           signal: context.controller.signal,
+          onPage: (items) => {
+            if (context.controller.signal.aborted || context.token !== this.#token) return;
+            for (const transaction of projectTransactions(items)) {
+              if (!watchWins(transaction.id)) this.#applyTransaction(transaction);
+            }
+            this.#commitTimeline();
+          },
         }),
         timelineReady,
       ]);
       this.#assertCurrent(context);
       if (historyResult.status === "rejected") throw errorFrom(historyResult.reason);
-      const items = historyResult.value;
-      for (const transaction of this.#transactionsById.values()) {
-        if (Date.parse(transaction.timestamp) < upperBound) {
-          this.#transactionsById.delete(transaction.id);
-        }
-      }
-      for (const transaction of projectTransactions(items)) this.#applyTransaction(transaction);
+      const kept = new Set(historyResult.value.map((item) => item.id));
       for (const watched of this.#watchTransactions.values()) {
-        if (watched.revision >= watchThreshold) this.#applyTransaction(watched.transaction);
+        if (watched.revision >= watchThreshold) kept.add(watched.transaction.id);
+      }
+      for (const row of this.#rowsById.values()) {
+        if (Date.parse(row.timestamp) < upperBound && !kept.has(row.id)) {
+          this.#removeTransaction(row.id);
+        }
       }
       this.#watchTransactions.clear();
       this.#materializedTo = Math.max(upperBound, this.#lastTimelineWatchAt ?? upperBound);
+      this.#traversedAt = accountClientNow(this.#client);
       this.#commitTransactions();
+      this.#commitTimeline();
       if (readyResult.status === "rejected") throw errorFrom(readyResult.reason);
     } catch (error) {
-      if (!context.controller.signal.aborted) this.#transactionStore.fail(errorFrom(error));
+      if (!context.controller.signal.aborted) this.#failTransactions(errorFrom(error));
       throw error;
     }
   }
 
-  async #refreshTransactionsAfterWatches(context: SyncContext): Promise<void> {
-    const starts = context.createdWatches.map(
-      (name) =>
-        this.#watchSlots.get(name)?.started.promise ??
-        Promise.reject(new TRAbortError(`Watch for Topic "${name}" was cancelled`)),
-    );
-    const results = await Promise.allSettled(starts);
-    this.#assertCurrent(context);
-    for (const result of results) {
-      if (result.status === "rejected") throw errorFrom(result.reason);
+  async #refreshTransactionsAfterWatch(context: SyncContext): Promise<void> {
+    if (context.createdWatches.includes("timelineTransactions")) {
+      const started =
+        this.#watchSlots.get("timelineTransactions")?.started.promise ??
+        Promise.reject(new TRAbortError('Watch for Topic "timelineTransactions" was cancelled'));
+      await started;
+      this.#assertCurrent(context);
     }
-    return this.#refreshTransactions(context, accountClientNow(this.#client));
+    return this.#refreshTransactions(
+      context,
+      accountClientNow(this.#client),
+      context.firstMaintenance ? this.#watchReady("timelineTransactions") : undefined,
+    );
   }
 
   async #refreshDocuments(context: SyncContext): Promise<void> {
@@ -703,10 +786,11 @@ export class TRAccount {
           this.#materializedTo = Math.max(this.#materializedTo, to);
         }
         this.#commitTransactions();
+        this.#commitTimeline();
       }
       return Object.freeze(result);
     } catch (error) {
-      if (token === this.#token) this.#transactionStore.fail(errorFrom(error));
+      if (token === this.#token) this.#failTransactions(errorFrom(error));
       throw error;
     } finally {
       range.signal?.removeEventListener("abort", abort);
@@ -727,8 +811,19 @@ export class TRAccount {
 
   #applyTransaction(transaction: ProjectedTransaction): void {
     if (transaction.timestamp < this.#windowFrom) return;
+    const current = this.#rowsById.get(transaction.id);
+    if (current === undefined || !equalRow(current, transaction.row)) {
+      this.#rowsById.set(transaction.id, transaction.row);
+      this.#timelineChanged = true;
+    }
     if (transaction.value) this.#transactionsById.set(transaction.id, transaction.value);
     else this.#transactionsById.delete(transaction.id);
+  }
+
+  #removeTransaction(id: string): void {
+    this.#rowsById.delete(id);
+    this.#transactionsById.delete(id);
+    this.#timelineChanged = true;
   }
 
   #commitCash(): void {
@@ -794,7 +889,7 @@ export class TRAccount {
     }
     const unchanged = current.data !== undefined && equalTransactions(current.data, value);
     this.#transactionStore.replace(
-      transactionSnapshot(
+      rangeSnapshot(
         "success",
         value,
         unchanged ? current.dataUpdatedAt : accountClientNow(this.#client),
@@ -802,6 +897,41 @@ export class TRAccount {
         range,
       ),
     );
+  }
+
+  /** Unlike the projection, raw rows are published before the Window is materialized. */
+  #commitTimeline(): void {
+    const current = this.#timelineStore.getSnapshot();
+    const range = this.#materializedRange();
+    const changed = this.#timelineChanged || current.data === undefined;
+    if (
+      current.status === "success" &&
+      !changed &&
+      equalRange(current.materializedRange, range) &&
+      current.traversedAt === this.#traversedAt
+    ) {
+      return;
+    }
+    this.#timelineChanged = false;
+    this.#timelineStore.replace(
+      withTraversal(
+        rangeSnapshot(
+          "success",
+          changed
+            ? Object.freeze([...this.#rowsById.values()].sort(compareTransactions))
+            : current.data!,
+          changed ? accountClientNow(this.#client) : current.dataUpdatedAt,
+          !this.#client.connection.getSnapshot().isAlive,
+          range,
+        ),
+        this.#traversedAt,
+      ),
+    );
+  }
+
+  #failTransactions(error: Error): void {
+    this.#transactionStore.fail(error);
+    this.#timelineStore.fail(error);
   }
 
   #commitDocuments(value: readonly AccountDocument[]): void {
@@ -827,7 +957,7 @@ export class TRAccount {
   }
 
   #failWatchSlice(name: WatchName, error: Error): void {
-    if (name === "timelineTransactions") this.#transactionStore.fail(error);
+    if (name === "timelineTransactions") this.#failTransactions(error);
     else this.#cashStore.fail(error);
   }
 
@@ -849,7 +979,7 @@ export class TRAccount {
     });
     if (context.token === this.#token) {
       if (!completed[0]) this.#cashStore.fail(error);
-      if (!completed[1]) this.#transactionStore.fail(error);
+      if (!completed[1]) this.#failTransactions(error);
       if (!completed[2]) this.#documentStore.fail(error);
     }
     throw error;
@@ -935,58 +1065,58 @@ function accountQueryWithStaleness<Value>(
   return snapshot("error", query.data, query.dataUpdatedAt, isStale, query.error);
 }
 
-function transactionSnapshot(
+function rangeSnapshot<Value>(
   status: "pending",
   data: undefined,
   dataUpdatedAt: undefined,
   isStale: false,
   materializedRange: undefined,
-): TransactionQuery;
-function transactionSnapshot(
+): RangeQuery<Value>;
+function rangeSnapshot<Value>(
   status: "success",
-  data: readonly Transaction[],
+  data: Value,
   dataUpdatedAt: number | undefined,
   isStale: boolean,
   materializedRange: MaterializedRange | undefined,
-): TransactionQuery;
-function transactionSnapshot(
+): RangeQuery<Value>;
+function rangeSnapshot<Value>(
   status: "error",
-  data: readonly Transaction[] | undefined,
+  data: Value | undefined,
   dataUpdatedAt: number | undefined,
   isStale: boolean,
   materializedRange: MaterializedRange | undefined,
   error: Error,
-): TransactionQuery;
-function transactionSnapshot(
-  status: TRQuery<readonly Transaction[]>["status"],
-  data: readonly Transaction[] | undefined,
+): RangeQuery<Value>;
+function rangeSnapshot<Value>(
+  status: TRQuery<Value>["status"],
+  data: Value | undefined,
   dataUpdatedAt: number | undefined,
   isStale: boolean,
   materializedRange: MaterializedRange | undefined,
   error?: Error,
-): TransactionQuery {
-  let query: AccountQuery<readonly Transaction[]>;
+): RangeQuery<Value> {
+  let query: AccountQuery<Value>;
   if (status === "pending") {
     query = snapshot("pending", undefined, undefined, false);
   } else if (status === "success") {
-    if (data === undefined) throw new Error("A successful TransactionQuery requires data");
+    if (data === undefined) throw new Error("A successful RangeQuery requires data");
     query = snapshot("success", data, dataUpdatedAt, isStale);
   } else {
-    if (!error) throw new Error("An error TransactionQuery requires an Error");
+    if (!error) throw new Error("An error RangeQuery requires an Error");
     query = snapshot("error", data, dataUpdatedAt, isStale, error);
   }
   return Object.freeze({ ...query, materializedRange });
 }
 
-function transactionQueryWithStaleness(
-  query: TransactionQuery,
+function rangeQueryWithStaleness<Value>(
+  query: RangeQuery<Value>,
   isStale: boolean,
-): TransactionQuery {
+): RangeQuery<Value> {
   if (query.status === "pending") {
-    return transactionSnapshot("pending", undefined, undefined, false, undefined);
+    return rangeSnapshot("pending", undefined, undefined, false, undefined);
   }
   if (query.status === "success") {
-    return transactionSnapshot(
+    return rangeSnapshot(
       "success",
       query.data,
       query.dataUpdatedAt,
@@ -994,13 +1124,37 @@ function transactionQueryWithStaleness(
       query.materializedRange,
     );
   }
-  return transactionSnapshot(
+  return rangeSnapshot(
     "error",
     query.data,
     query.dataUpdatedAt,
     isStale,
     query.materializedRange,
     query.error,
+  );
+}
+
+function withTraversal(
+  query: RangeQuery<readonly TimelineTransaction[]>,
+  traversedAt: number | undefined,
+): TimelineQuery {
+  return Object.freeze({ ...query, traversedAt });
+}
+
+function rangeStore<Value>(): SnapshotStore<Value, RangeQuery<Value>> {
+  return new SnapshotStore<Value, RangeQuery<Value>>(
+    rangeSnapshot("pending", undefined, undefined, false, undefined),
+    (current, error) =>
+      rangeSnapshot(
+        "error",
+        current.data,
+        current.dataUpdatedAt,
+        current.isStale,
+        current.materializedRange,
+        error,
+      ),
+    () => rangeSnapshot("pending", undefined, undefined, false, undefined),
+    (current, isStale) => rangeQueryWithStaleness(current, isStale),
   );
 }
 
@@ -1038,6 +1192,7 @@ function projectTransactions(items: readonly TimelineTransaction[]): ProjectedTr
     values.set(item.id, {
       id: item.id,
       timestamp,
+      row: item,
       value: item.hidden || item.deleted ? undefined : projectTransaction(item),
     });
   }
@@ -1176,7 +1331,16 @@ function equalRange(
     : left.from === right.from && left.to === right.to;
 }
 
-function compareTransactions(left: Transaction, right: Transaction): number {
+/** Rows come from JSON, so equal text is equal content. */
+function equalRow(left: TimelineTransaction, right: TimelineTransaction): boolean {
+  return left === right || JSON.stringify(left) === JSON.stringify(right);
+}
+
+/** Newest first, then by id. Fits projected Transactions and raw rows alike. */
+function compareTransactions(
+  left: { readonly timestamp: string; readonly id: string },
+  right: { readonly timestamp: string; readonly id: string },
+): number {
   return Date.parse(right.timestamp) - Date.parse(left.timestamp) || compareText(left.id, right.id);
 }
 

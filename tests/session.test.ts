@@ -333,6 +333,55 @@ describe("Session", () => {
     expect(client.sessionValidity).toBe("presumed-valid");
   });
 
+  test("opens the socket at once with a fresh token and refreshes an expiring one first", async () => {
+    const { client: loggedIn } = await loginClient(mockFetch(confirmedLoginResponses()));
+    const saved = loggedIn.exportSession();
+    loggedIn.logout();
+
+    // 300 s left: no refresh stands between the caller and the socket.
+    const freshFetch = mockFetch([]);
+    const freshSockets: FakeSocket[] = [];
+    const fresh = new TRClient({
+      session: saved,
+      fetch: freshFetch,
+      clock: new FakeClock(startTime),
+      socket: () => {
+        const socket = new FakeSocket();
+        freshSockets.push(socket);
+        return socket;
+      },
+    });
+    void fresh.cash.get({}).catch(() => undefined);
+    expect(freshSockets).toHaveLength(1);
+    expect(freshFetch).not.toHaveBeenCalled();
+    fresh.logout();
+
+    // 20 s left: the upgrade request must carry a refreshed token.
+    const refreshedJwt = jwt(1_280, 1_580);
+    const expiringFetch = mockFetch([
+      response(undefined, [
+        `tr_session=${refreshedJwt}; Path=/; Secure; HttpOnly; SameSite=Strict`,
+      ]),
+    ]);
+    const clock = new FakeClock(1_280_000);
+    const socketOptions: Array<SocketOptions | undefined> = [];
+    const expiring = new TRClient({
+      session: saved,
+      fetch: expiringFetch,
+      clock,
+      socket: (_url, _protocols, options) => {
+        socketOptions.push(options);
+        return new FakeSocket(clock);
+      },
+    });
+    void expiring.cash.get({}).catch(() => undefined);
+    expect(socketOptions).toHaveLength(0);
+    await flushUntil(() => socketOptions.length === 1);
+    expect(expiringFetch).toHaveBeenCalledTimes(1);
+    expect(socketOptions[0]?.headers?.Cookie).toContain(refreshedJwt);
+    expiring.logout();
+  });
+
   test("exports and restores an opaque Session with its Refresh timer", async () => {
     const fetch = mockFetch(confirmedLoginResponses());
     const { client } = await loginClient(fetch);
@@ -568,7 +617,12 @@ describe("Session", () => {
   ])("preserves a reactive Refresh %s error", async (_name, refreshResponse, ErrorType) => {
     const fetch = mockFetch([...confirmedLoginResponses(), refreshResponse]);
     const socket = new FakeSocket();
-    const client = new TRClient({ fetch, socket: () => socket, validate: "throw" });
+    const client = new TRClient({
+      clock: new FakeClock(startTime),
+      fetch,
+      socket: () => socket,
+      validate: "throw",
+    });
     await client.login("+49123456789", "1234", { pollIntervalMs: 0 });
 
     const result = client.cash.get({});

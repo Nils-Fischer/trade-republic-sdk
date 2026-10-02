@@ -72,6 +72,11 @@ the Session, but opening the _next_ one needs a valid Session.
 One socket carries all Subscriptions, held open by the Echo keepalive. On transport loss the
 SDK replays resumable Subscriptions on a backoff, so a Watch goes quiet and resumes on its own.
 `client.connection` and `client.session` are subscribable stores (`getSnapshot` / `subscribe`).
+The connection is alive from the moment Trade Republic accepts the handshake. An Echo that is
+still missing at the next tick loses the transport. Subscriptions go out in the same flight as the
+handshake, because Trade Republic answers frames in order; that saves a round trip. Before it opens
+a socket or sends a REST request, the client refreshes a Session token with less than 30 s left,
+so a fresh one costs no round trip and an expired one never earns a 401.
 
 ## TRAccount
 
@@ -85,6 +90,7 @@ await account.sync();
 
 account.cash.getSnapshot(); // AccountQuery<AccountCash>
 account.transactions.getSnapshot(); // + materializedRange
+account.timeline.getSnapshot(); // raw rows, page by page
 account.documents.getSnapshot();
 
 // Reads outside the Window go to Trade Republic instead of failing.
@@ -97,9 +103,17 @@ account.stop();
 ```
 
 Each Slice (cash, transactions, documents) fails and updates on its own, so a moving balance
-never disturbs a transaction list. Transactions track a **Materialized Range** rather than a
+never disturbs a transaction list. `slices: ["transactions"]` keeps only the Slices you name; the
+others stay pending and cost no I/O. `transactionWindow.from` may be a function; the SDK calls it at every Sync,
+so the Window can follow the app's own state. A later start drops older rows. Transactions track a **Materialized Range** rather than a
 count, which keeps "no transactions in March" distinct from "March was never fetched". Money is
 normalized to integer minor units.
+
+`timeline` holds the same Window as raw `TimelineTransaction` rows, hidden and deleted rows
+included, for an app that keeps its own archive. It publishes as rows arrive: the Watch's first
+value is the newest page, and each history page follows. Its `materializedRange` is set only once
+a traversal completes, and `traversedAt` changes only then. A Watch push moves `materializedRange.to` but not `traversedAt`. An unchanged row keeps its object, so an unchanged Sync publishes nothing.
+`client.getTimelineTransactions` takes the same `onPage` callback.
 
 ### Timeline rows
 
@@ -111,9 +125,11 @@ import {
   timelineEventKind,
   timelineIconUrl,
   timelineMerchantCategory,
+  timelineStatusKind,
 } from "trade-republic-sdk";
 
 timelineEventKind("CARD_TRANSACTION"); // "cardPayment"; "unknown" for a type not yet mapped
+timelineStatusKind(row.status); // "executed" | "pending" | "cancelled" | "unknown"
 timelineMerchantCategory("logos/merchant-fallback-restaurants/v2"); // "restaurants"
 isTimelineMerchantLogo(row.icon); // true only for a merchant's own logo
 timelineIconUrl(row.icon, "dark"); // public SVG or PNG, no Session needed
@@ -121,7 +137,9 @@ timelineIconUrl(row.icon, "dark"); // public SVG or PNG, no Session needed
 
 The event map follows pytr's, which covers old and new timeline formats. A top-up of the
 customer's own money (`topUp`) is kept apart from an incoming transfer (`transferIn`), and events
-that move no money are `notice`. A merchant without a
+that move no money are `notice`. A declined, cancelled, or expired card payment stays a row of
+its own with status `CANCELED` (the subtitle says which), and a retry that goes through is a new
+row, so count only `executed` and `pending` rows as money moved. A merchant without a
 logo gets a fallback icon that names its card-network category; a merchant with a logo gets
 none.
 
@@ -156,7 +174,7 @@ function Portfolio() {
 }
 ```
 
-Slices: `useCash`, `useTransactions`, `useDocuments`, `useAccountSlice`,
+Slices: `useCash`, `useTransactions`, `useTimeline`, `useDocuments`, `useAccountSlice`,
 `useTransactionRange`. Direct reads: `useWatch`, `useGet` (with `refetch`). State:
 `useSession`, `useConnection`. Actions: `useLogin` (exposes `awaiting-approval`), `useSync`.
 Equal requests inside one provider share a single Subscription. Snapshots are referentially

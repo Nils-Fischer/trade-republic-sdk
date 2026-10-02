@@ -19,6 +19,7 @@ import {
   type AccountDocument,
   type AccountQuery,
   type AccountSlice,
+  type TimelineQuery,
   type Transaction,
   type TransactionQuery,
   type TransactionSlice,
@@ -127,6 +128,12 @@ export function useCash(): AccountQuery<AccountCash> {
 export function useTransactions(): TransactionQuery {
   const account = useAccount("useTransactions");
   return useAccountSlice(account.transactions);
+}
+
+/** Raw timeline rows in the Window, published page by page. */
+export function useTimeline(): TimelineQuery {
+  const account = useAccount("useTimeline");
+  return useExternalStore(account.timeline);
 }
 
 export function useDocuments(): AccountQuery<readonly AccountDocument[]> {

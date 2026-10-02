@@ -124,7 +124,8 @@ async function completeInitialSync(
       .map((request) => request.payload.type)
       .sort(),
   ).toEqual(["availableCash", "cash", "timelineTransactions"]);
-  expect(subscriptions(socket)).toHaveLength(3);
+  // History starts once the timeline Watch is subscribed, before any first value.
+  expect(subscriptions(socket)).toHaveLength(4);
   socket.receive(snapshot(cash.id, [{ accountNumber: "cash-1", currencyId: "EUR", amount: 100 }]));
   socket.receive(
     snapshot(available.id, [{ accountNumber: "cash-1", currencyId: "EUR", amount: 80 }]),
@@ -175,7 +176,7 @@ describe("TRAccount", () => {
     expect(account.cash.getSnapshot()).toMatchObject({
       status: "success",
       dataUpdatedAt: now,
-      isStale: true,
+      isStale: false,
       data: {
         balances: [{ accountNumber: "cash-1", currency: "EUR", amount: 100 }],
         available: [{ accountNumber: "cash-1", currency: "EUR", amount: 80 }],
@@ -204,6 +205,159 @@ describe("TRAccount", () => {
     });
     expect(Object.isFrozen(account.cash.getSnapshot().data?.balances)).toBe(true);
     expect(Object.isFrozen(account.transactions.getSnapshot().data?.[0]?.amount)).toBe(true);
+  });
+
+  test("keeps only the chosen Slices and publishes raw rows page by page", async () => {
+    const clock = new FakeClock(now);
+    const socket = new FakeSocket(clock);
+    const fetch = vi.fn<Fetch>(async () => documentResponse());
+    const client = new TRClient({
+      clock,
+      fetch,
+      socket: () => socket,
+      session: savedSession(),
+      validate: "throw",
+    });
+    const account = new TRAccount(client, {
+      transactionWindow: { from },
+      slices: ["transactions"],
+    });
+    const newest = transaction("newest", "2026-01-08T00:00:00.000Z");
+    const cancelled = { ...transaction("cancelled", "2026-01-07T00:00:00.000Z"), hidden: true };
+    const older = transaction("older", "2026-01-03T00:00:00.000Z");
+    const stored = transaction("stored", "2026-01-02T00:00:00.000Z");
+
+    const syncing = account.sync();
+    await accept(socket);
+    const [watch, firstPage] = subscriptions(socket);
+    expect(subscriptions(socket).map((request) => request.payload.type)).toEqual([
+      "timelineTransactions",
+      "timelineTransactions",
+    ]);
+
+    // The Watch's first value is page one; it is published before history ends.
+    socket.receive(snapshot(watch!.id, { items: [newest, cancelled], cursors: {} }));
+    await flush();
+    expect(account.timeline.getSnapshot()).toMatchObject({
+      status: "success",
+      materializedRange: undefined,
+      data: [{ id: "newest" }, { id: "cancelled", hidden: true }],
+    });
+    expect(account.transactions.getSnapshot().status).toBe("pending");
+
+    socket.receive(
+      snapshot(firstPage!.id, { items: [newest, cancelled, older], cursors: { after: "page-2" } }),
+    );
+    await flush();
+    expect(account.timeline.getSnapshot().data?.map((row) => row.id)).toEqual([
+      "newest",
+      "cancelled",
+      "older",
+    ]);
+
+    const secondPage = subscriptions(socket).at(-1)!;
+    socket.receive(snapshot(secondPage.id, { items: [stored], cursors: {} }));
+    await syncing;
+
+    expect(account.timeline.getSnapshot()).toMatchObject({
+      status: "success",
+      materializedRange: { from: "2026-01-01T00:00:00.000Z" },
+    });
+    expect(account.timeline.getSnapshot().data?.map((row) => row.id)).toEqual([
+      "newest",
+      "cancelled",
+      "older",
+      "stored",
+    ]);
+    expect(account.transactions.getSnapshot().data?.map((value) => value.id)).toEqual([
+      "newest",
+      "older",
+      "stored",
+    ]);
+    expect(account.cash.getSnapshot().status).toBe("pending");
+    expect(account.documents.getSnapshot().status).toBe("pending");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  test("keeps the timeline Snapshot for an unchanged Sync and drops rows history no longer has", async () => {
+    const { account, socket } = setup();
+    const kept = transaction("kept", "2026-01-05T00:00:00.000Z");
+    const gone = transaction("gone", "2026-01-04T00:00:00.000Z");
+    await completeInitialSync(account, socket, [], [kept, gone]);
+    expect(account.timeline.getSnapshot().data?.map((row) => row.id)).toEqual(["kept", "gone"]);
+    const before = account.timeline.getSnapshot();
+
+    const { timeline } = initialRequests(socket);
+    socket.receive(snapshot(timeline[0]!.id, { items: [{ ...kept }], cursors: {} }));
+    await flush();
+    expect(account.timeline.getSnapshot().data).toBe(before.data);
+
+    const syncing = account.sync();
+    await flush();
+    const cash = subscriptions(socket)
+      .filter((request) => request.payload.type === "cash")
+      .at(-1)!;
+    const available = subscriptions(socket)
+      .filter((request) => request.payload.type === "availableCash")
+      .at(-1)!;
+    socket.receive(snapshot(cash.id, []));
+    socket.receive(snapshot(available.id, []));
+    const history = subscriptions(socket)
+      .filter((request) => request.payload.type === "timelineTransactions")
+      .at(-1)!;
+    socket.receive(snapshot(history.id, { items: [kept], cursors: {} }));
+    await syncing;
+
+    expect(account.timeline.getSnapshot().data?.map((row) => row.id)).toEqual(["kept"]);
+  });
+
+  test("reads a moving Window at each Sync and marks only finished traversals", async () => {
+    const clock = new FakeClock(now);
+    const socket = new FakeSocket(clock);
+    const client = new TRClient({
+      clock,
+      fetch: vi.fn<Fetch>(),
+      socket: () => socket,
+      session: savedSession(),
+      validate: "throw",
+    });
+    let windowFrom = new Date("2025-12-01T00:00:00.000Z");
+    const account = new TRAccount(client, {
+      transactionWindow: { from: () => windowFrom },
+      slices: ["transactions"],
+    });
+    const december = transaction("december", "2025-12-15T00:00:00.000Z");
+    const january = transaction("january", "2026-01-05T00:00:00.000Z");
+
+    const first = account.sync();
+    await accept(socket);
+    const [watch, history] = subscriptions(socket);
+    socket.receive(snapshot(watch!.id, { items: [january], cursors: {} }));
+    socket.receive(snapshot(history!.id, { items: [january, december], cursors: {} }));
+    await first;
+    const traversed = account.timeline.getSnapshot().traversedAt;
+    expect(traversed).toBe(now);
+    expect(account.timeline.getSnapshot().materializedRange?.from).toBe("2025-12-01T00:00:00.000Z");
+
+    // A push moves the materialized end but is not a finished traversal.
+    clock.advanceBy(1_000);
+    socket.receive(snapshot(watch!.id, { items: [{ ...january, title: "Pushed" }], cursors: {} }));
+    await flush();
+    expect(account.timeline.getSnapshot().data?.[0]?.title).toBe("Pushed");
+    expect(account.timeline.getSnapshot().traversedAt).toBe(traversed);
+
+    // The next Sync starts where the function now points and drops older rows.
+    windowFrom = new Date("2026-01-01T00:00:00.000Z");
+    const second = account.sync();
+    await flush();
+    const nextHistory = subscriptions(socket).at(-1)!;
+    socket.receive(snapshot(nextHistory.id, { items: [january, december], cursors: {} }));
+    await second;
+    expect(account.timeline.getSnapshot()).toMatchObject({
+      materializedRange: { from: "2026-01-01T00:00:00.000Z" },
+      traversedAt: now + 1_000,
+    });
+    expect(account.timeline.getSnapshot().data?.map((row) => row.id)).toEqual(["january"]);
   });
 
   test("accepts timeline transactions that omit subAmount", async () => {
@@ -313,7 +467,8 @@ describe("TRAccount", () => {
     expect(account.transactions.getSnapshot().error).toBeInstanceOf(TRAbortError);
     expect(account.documents.getSnapshot().status).toBe("error");
     expect(account.documents.getSnapshot().error).toBeInstanceOf(TRAbortError);
-    expect(socket.sent.filter((line) => line.startsWith("unsub "))).toHaveLength(3);
+    // Three Watches and the first history page.
+    expect(socket.sent.filter((line) => line.startsWith("unsub "))).toHaveLength(4);
   });
 
   test("publishes successful slices when cash validation fails", async () => {
@@ -563,7 +718,7 @@ describe("TRAccount", () => {
 
     const syncing = account.sync();
     await flush();
-    const watchRequests = subscriptions(socket).slice(subscriptionCount);
+    const watchRequests = subscriptions(socket).slice(subscriptionCount, subscriptionCount + 3);
     expect(watchRequests.map((request) => request.payload.type).sort()).toEqual([
       "availableCash",
       "cash",
@@ -633,14 +788,11 @@ describe("TRAccount", () => {
     clock.advanceBy(1_000);
     await flush();
     await accept(sockets[1]!);
-    expect(client.connection.getSnapshot()).toEqual({ isAlive: false, isRecovering: false });
+    // Accepting the handshake proves the transport alive and starts the recovery Sync.
+    expect(client.connection.getSnapshot()).toEqual({ isAlive: true, isRecovering: false });
     expect(account.transactions.getSnapshot().status).toBe("success");
-    expect(account.transactions.getSnapshot().isStale).toBe(true);
-
-    clock.advanceBy(2_500);
-    sockets[1]!.receive(sockets[1]!.sent.at(-1)!);
-    await flush();
     expect(account.transactions.getSnapshot().isStale).toBe(false);
+    await flush();
     const recoveryReads = subscriptions(sockets[1]!).slice(3);
     expect(recoveryReads.map((request) => request.payload.type).sort()).toEqual([
       "availableCash",
@@ -768,6 +920,7 @@ describe("TRAccount", () => {
         "useLogin",
         "useSession",
         "useSync",
+        "useTimeline",
         "useTRAccount",
         "useTRClient",
         "useTransactionRange",

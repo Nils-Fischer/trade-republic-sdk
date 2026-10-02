@@ -67,6 +67,8 @@ export interface GetTimelineTransactionsOptions {
   signal?: AbortSignal;
   pageTimeoutMs?: number;
   maxPages?: number;
+  /** Receives each page's in-range rows, newest first, once the page passes validation. */
+  onPage?: (transactions: readonly TimelineTransaction[]) => void;
 }
 
 export interface ClientStateStore<Snapshot> {
@@ -233,6 +235,7 @@ export class TRClient {
       let pageNewest: number | undefined;
       let pageOldest: number | undefined;
       let crossedFrom = false;
+      const inRange: TimelineTransaction[] = [];
 
       for (const transaction of page.items) {
         const timestamp = Date.parse(transaction.timestamp);
@@ -251,6 +254,7 @@ export class TRClient {
         if (timestamp < from) crossedFrom = true;
         if (timestamp >= from && timestamp < to) {
           transactions.set(transaction.id, transaction);
+          inRange.push(transaction);
         }
       }
 
@@ -258,6 +262,7 @@ export class TRClient {
         throw new TRValidationError("Timeline pages overlap out of order");
       }
       if (pageOldest !== undefined) previousPageOldest = pageOldest;
+      if (inRange.length > 0) options.onPage?.(inRange);
       if (crossedFrom) return newestFirst(transactions);
 
       const next = page.cursors.after;
@@ -498,10 +503,15 @@ export class TRClient {
     return error instanceof TRTopicError && error.errorCode === "AUTHENTICATION_ERROR";
   }
 
+  /**
+   * The socket carries the Session's cookies from its upgrade request, so an
+   * expiring token is refreshed first. A fresh one adds no round trip.
+   */
   #connect(): Promise<void> {
-    return (
-      this.#connectionUpdate?.then(() => this.#connection.connect()) ?? this.#connection.connect()
-    );
+    const connect = (): Promise<void> =>
+      this.#session.ensureFresh()?.then(() => this.#connection.connect()) ??
+      this.#connection.connect();
+    return this.#connectionUpdate?.then(connect) ?? connect();
   }
 
   #closeSubscription(subscription: SubscriptionControl | undefined): undefined {
